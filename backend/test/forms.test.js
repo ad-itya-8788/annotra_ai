@@ -18,7 +18,23 @@ test('form definitions require unique questions and valid choice options', () =>
   }), { status: 400 });
 });
 
-test('answers enforce required fields and values from configured choices', () => {
+test('form definitions preserve optional input placeholders and file upload fields', () => {
+  const { fields } = normalizeFormDefinition({
+    title: 'Contact',
+    fields: [
+      { id: 'name', label: 'Name', type: 'short', placeholder: 'Your name' },
+      { id: 'attachment', label: 'Attachment', type: 'file' },
+    ],
+  });
+  assert.equal(fields[0].placeholder, 'Your name');
+  assert.equal(fields[1].type, 'file');
+  assert.throws(() => normalizeFormDefinition({
+    title: 'Contact',
+    fields: [{ id: 'name', label: 'Name', type: 'short', placeholder: 'x'.repeat(201) }],
+  }), { status: 400 });
+});
+
+test('answers enforce required fields and one configured checkbox option', () => {
   const { fields } = normalizeFormDefinition({
     title: 'Contact',
     fields: [
@@ -26,12 +42,24 @@ test('answers enforce required fields and values from configured choices', () =>
       { id: 'topics', label: 'Topics', type: 'multiple', required: true, options: ['AI', 'Video'] },
     ],
   });
-  assert.throws(() => normalizeFormAnswers(fields, { email: 'person@example.com', topics: [] }), { status: 400 });
-  assert.throws(() => normalizeFormAnswers(fields, { email: 'person@example.com', topics: ['Unknown'] }), { status: 400 });
-  assert.deepEqual(normalizeFormAnswers(fields, { email: 'person@example.com', topics: ['AI'] }), {
+  assert.throws(() => normalizeFormAnswers(fields, { email: 'person@example.com', topics: '' }), { status: 400 });
+  assert.throws(() => normalizeFormAnswers(fields, { email: 'person@example.com', topics: ['AI', 'Video'] }), { status: 400 });
+  assert.throws(() => normalizeFormAnswers(fields, { email: 'person@example.com', topics: 'Unknown' }), { status: 400 });
+  assert.deepEqual(normalizeFormAnswers(fields, { email: 'person@example.com', topics: 'AI' }), {
     email: 'person@example.com',
-    topics: ['AI'],
+    topics: 'AI',
   });
+});
+
+test('file answers require a valid uploaded file descriptor', () => {
+  const { fields } = normalizeFormDefinition({
+    title: 'Application',
+    fields: [{ id: 'resume', label: 'Resume', type: 'file', required: true }],
+  });
+  const validFile = { name: 'resume.pdf', url: 'https://files.example/form-responses/123e4567-e89b-12d3-a456-426614174000.pdf' };
+  assert.deepEqual(normalizeFormAnswers(fields, { resume: validFile }), { resume: validFile });
+  assert.throws(() => normalizeFormAnswers(fields, { resume: '' }), { status: 400 });
+  assert.throws(() => normalizeFormAnswers(fields, { resume: { name: 'resume.pdf', url: 'javascript:alert(1)' } }), { status: 400 });
 });
 
 test('phone answers are validated before they are stored', () => {

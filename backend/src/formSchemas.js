@@ -1,4 +1,4 @@
-const fieldTypes = new Set(['short', 'paragraph', 'email', 'phone', 'number', 'date', 'single', 'multiple', 'dropdown']);
+const fieldTypes = new Set(['short', 'paragraph', 'email', 'phone', 'number', 'date', 'single', 'multiple', 'dropdown', 'file']);
 const choiceTypes = new Set(['single', 'multiple', 'dropdown']);
 
 export function slugifyFormTitle(value) {
@@ -29,12 +29,16 @@ export function normalizeFormDefinition(body) {
     const id = typeof field.id === 'string' ? field.id.trim() : '';
     const label = typeof field.label === 'string' ? field.label.trim() : '';
     const type = typeof field.type === 'string' ? field.type : '';
+    const placeholder = typeof field.placeholder === 'string' ? field.placeholder.trim() : '';
     if (!/^[a-zA-Z0-9_-]{1,60}$/.test(id) || ['__proto__', 'constructor', 'prototype'].includes(id) || ids.has(id)) {
       throw Object.assign(new Error('Each question must have a unique valid ID.'), { status: 400 });
     }
     ids.add(id);
     if (!label || label.length > 300 || !fieldTypes.has(type)) {
       throw Object.assign(new Error('Each question needs a prompt of up to 300 characters and a supported answer type.'), { status: 400 });
+    }
+    if (placeholder.length > 200) {
+      throw Object.assign(new Error(`Placeholder for "${label}" must be 200 characters or fewer.`), { status: 400 });
     }
     let options = [];
     if (choiceTypes.has(type)) {
@@ -47,7 +51,7 @@ export function normalizeFormDefinition(body) {
         throw Object.assign(new Error(`"${label}" must have between 2 and 50 non-empty choices.`), { status: 400 });
       }
     }
-    return { id, label, type, required: field.required === true, options };
+    return { id, label, type, required: field.required === true, options, placeholder };
   });
   return { title, description, slug, fields };
 }
@@ -66,14 +70,28 @@ export function normalizeFormAnswers(fields, submitted) {
     if (field.type === 'multiple') {
       if (value === undefined || value === null || value === '') {
         if (field.required) throw Object.assign(new Error(`"${field.label}" is required.`), { status: 400 });
-        answers[field.id] = [];
+        answers[field.id] = '';
         continue;
       }
-      if (!Array.isArray(value) || value.length > 50 || value.some((option) => typeof option !== 'string' || !field.options.includes(option))) {
-        throw Object.assign(new Error(`Choose valid options for "${field.label}".`), { status: 400 });
+      if (typeof value !== 'string' || !field.options.includes(value.trim())) {
+        throw Object.assign(new Error(`Choose one valid option for "${field.label}".`), { status: 400 });
       }
-      answers[field.id] = [...new Set(value)];
-      if (field.required && !answers[field.id].length) throw Object.assign(new Error(`"${field.label}" is required.`), { status: 400 });
+      answers[field.id] = value.trim();
+      continue;
+    }
+    if (field.type === 'file') {
+      if (value === undefined || value === null || value === '') {
+        if (field.required) throw Object.assign(new Error(`"${field.label}" is required.`), { status: 400 });
+        answers[field.id] = '';
+        continue;
+      }
+      if (!value || typeof value !== 'object' || Array.isArray(value)
+        || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 200
+        || typeof value.url !== 'string' || value.url.length > 1000
+        || !/^https:\/\/[^/]+\/.+/i.test(value.url)) {
+        throw Object.assign(new Error(`Choose a valid uploaded file for "${field.label}".`), { status: 400 });
+      }
+      answers[field.id] = { name: value.name.trim(), url: value.url };
       continue;
     }
     if (value != null && typeof value !== 'string') {

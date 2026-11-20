@@ -11,8 +11,9 @@ const fieldTypes = [
   ['number', 'Number'],
   ['date', 'Date'],
   ['single', 'Multiple choice'],
-  ['multiple', 'Checkboxes'],
+  ['multiple', 'Checkboxes (select one)'],
   ['dropdown', 'Dropdown'],
+  ['file', 'File upload'],
 ];
 const choiceTypes = new Set(['single', 'multiple', 'dropdown']);
 const cleanSlug = (value) => value.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80).replace(/-+$/g, '');
@@ -20,11 +21,12 @@ const createField = () => ({
   id: globalThis.crypto?.randomUUID?.().replaceAll('-', '') || `${Date.now()}${Math.random().toString(36).slice(2, 8)}`,
   label: '',
   type: 'short',
+  placeholder: '',
   required: false,
   options: [],
 });
 const csvCell = (value) => {
-  const text = Array.isArray(value) ? value.join('; ') : value == null ? '' : String(value);
+  const text = Array.isArray(value) ? value.join('; ') : value && typeof value === 'object' ? value.name || value.url || '' : value == null ? '' : String(value);
   const safe = /^[\s\u0000-\u001f]*[=+\-@]/.test(text) ? `'${text}` : text;
   return `"${safe.replaceAll('"', '""')}"`;
 };
@@ -216,7 +218,9 @@ export function FormsPage() {
           <div className="forms-question-grid">
             <label>Question text<input value={field.label} maxLength={300} required placeholder="Enter your question" onChange={(event) => updateField(field.id, { label: event.target.value })}/></label>
             <label>Answer type<select value={field.type} onChange={(event) => updateField(field.id, { type: event.target.value, options: choiceTypes.has(event.target.value) ? field.options.length ? field.options : ['Option 1', 'Option 2'] : [] })}>{fieldTypes.map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label>
+            {!choiceTypes.has(field.type) && field.type !== 'file' && <label>Placeholder<input value={field.placeholder || ''} maxLength={200} placeholder="e.g. Enter your answer" onChange={(event) => updateField(field.id, { placeholder: event.target.value })}/></label>}
             {choiceTypes.has(field.type) && <label className="forms-options-field">Choices<textarea rows="3" value={field.options.join('\n')} onChange={(event) => updateField(field.id, { options: event.target.value.split('\n') })} placeholder={'One choice per line'}/></label>}
+            {field.type === 'file' && <small className="forms-file-hint">PDF, DOC, DOCX, JPG, PNG, or WebP. Maximum file size: 4 MB.</small>}
             <label className="forms-required-toggle"><input type="checkbox" checked={field.required} onChange={(event) => updateField(field.id, { required: event.target.checked })}/>Required question</label>
           </div>
         </article>)}
@@ -240,20 +244,39 @@ export function FormsPage() {
       <div className="forms-responses-heading"><div><h3>Responses</h3><span>{responseData?.responses.length ?? 0} submissions</span></div><button className="button secondary small" type="button" disabled={!responseData?.responses.length} onClick={() => downloadResponses(responseData.form, responseData.responses)}><Download size={14}/>Export CSV</button></div>
       {loadingResponses ? <div className="forms-loading"><LoaderCircle className="spin" size={18}/>Loading responses…</div>
         : !responseData ? <div className="forms-empty">Responses could not be loaded.</div>
-        : responseData.responses.length ? <div className="table-scroll"><table className="forms-responses-table"><thead><tr><th>Submitted</th>{responseData.form.fields.map((field) => <th key={field.id}>{field.label}</th>)}</tr></thead><tbody>{responseData.responses.map((response) => <tr key={response.id}><td>{new Date(response.created_at).toLocaleString()}</td>{responseData.form.fields.map((field) => <td key={field.id}>{Array.isArray(response.answers?.[field.id]) ? response.answers[field.id].join(', ') : response.answers?.[field.id] || '—'}</td>)}</tr>)}</tbody></table></div>
+        : responseData.responses.length ? <div className="table-scroll"><table className="forms-responses-table"><thead><tr><th>Submitted</th>{responseData.form.fields.map((field) => <th key={field.id}>{field.label}</th>)}</tr></thead><tbody>{responseData.responses.map((response) => <tr key={response.id}><td>{new Date(response.created_at).toLocaleString()}</td>{responseData.form.fields.map((field) => {
+          const answer = response.answers?.[field.id];
+          return <td key={field.id}>{Array.isArray(answer) ? answer.join(', ') : answer && typeof answer === 'object' && answer.url ? <a href={answer.url} target="_blank" rel="noreferrer">{answer.name || 'View file'}</a> : answer || '—'}</td>;
+        })}</tr>)}</tbody></table></div>
           : <div className="forms-empty">Responses will appear here after someone submits the public form.</div>}
     </section>}
   </section>;
 }
 
-function FormQuestion({ field, value, onChange }) {
+function FormQuestion({ field, value, onChange, onFileChange, uploading }) {
   const labelId = `${field.id}-label`;
-  if (field.type === 'paragraph') return <textarea rows="4" aria-labelledby={labelId} value={value || ''} required={field.required} onChange={(event) => onChange(event.target.value)}/>;
+  const placeholder = field.placeholder || {
+    short: 'Enter your answer',
+    paragraph: 'Enter your answer',
+    email: 'name@example.com',
+    phone: '+91 98765 43210',
+    number: 'Enter a number',
+  }[field.type] || '';
+  if (field.type === 'file') return <>
+    <input type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/jpeg,image/png,image/webp" aria-labelledby={labelId} required={field.required && !value?.url} disabled={uploading} onChange={(event) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (file) onFileChange(file);
+    }}/>
+    {uploading && <small className="public-form-file-status">Uploading file…</small>}
+    {value?.name && <small className="public-form-file-status">Uploaded: {value.name}</small>}
+  </>;
+  if (field.type === 'paragraph') return <textarea rows="4" aria-labelledby={labelId} value={value || ''} placeholder={placeholder} required={field.required} onChange={(event) => onChange(event.target.value)}/>;
   if (field.type === 'single') return <div className="public-form-choices" role="radiogroup" aria-labelledby={labelId}>{field.options.map((option) => <label key={option}><input type="radio" name={field.id} value={option} checked={value === option} required={field.required} onChange={() => onChange(option)}/>{option}</label>)}</div>;
-  if (field.type === 'multiple') return <div className="public-form-choices" role="group" aria-labelledby={labelId}>{field.options.map((option) => <label key={option}><input type="checkbox" value={option} checked={(value || []).includes(option)} onChange={(event) => onChange(event.target.checked ? [...(value || []), option] : (value || []).filter((item) => item !== option))}/>{option}</label>)}</div>;
+  if (field.type === 'multiple') return <div className="public-form-choices" role="group" aria-labelledby={labelId}>{field.options.map((option) => <label key={option}><input type="checkbox" value={option} checked={value === option} onChange={(event) => onChange(event.target.checked ? option : '')}/>{option}</label>)}</div>;
   if (field.type === 'dropdown') return <select aria-labelledby={labelId} value={value || ''} required={field.required} onChange={(event) => onChange(event.target.value)}><option value="">Select an option</option>{field.options.map((option) => <option key={option} value={option}>{option}</option>)}</select>;
   const type = field.type === 'short' ? 'text' : field.type === 'phone' ? 'tel' : field.type;
-  return <input type={type} aria-labelledby={labelId} value={value || ''} required={field.required} onChange={(event) => onChange(event.target.value)}/>;
+  return <input type={type} aria-labelledby={labelId} value={value || ''} placeholder={placeholder} required={field.required} onChange={(event) => onChange(event.target.value)}/>;
 }
 
 export function PublicFormPage({ slug }) {
@@ -263,6 +286,7 @@ export function PublicFormPage({ slug }) {
   const [busy, setBusy] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState('');
+  const [uploadingFields, setUploadingFields] = useState({});
 
   useEffect(() => {
     let active = true;
@@ -287,8 +311,31 @@ export function PublicFormPage({ slug }) {
     return () => { active = false; };
   }, [slug]);
 
+  const uploadResponseFile = async (field, file) => {
+    if (file.size > 4 * 1024 * 1024) {
+      setError('File must be no larger than 4 MB.');
+      return;
+    }
+    setError('');
+    setUploadingFields((current) => ({ ...current, [field.id]: true }));
+    const body = new FormData();
+    body.set('file', file);
+    try {
+      const result = await api(`/public/forms/${encodeURIComponent(slug)}/uploads/${encodeURIComponent(field.id)}`, {
+        method: 'POST',
+        body,
+      });
+      setAnswers((current) => ({ ...current, [field.id]: result.data }));
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setUploadingFields((current) => ({ ...current, [field.id]: false }));
+    }
+  };
+
   const submit = async (event) => {
     event.preventDefault();
+    if (Object.values(uploadingFields).some(Boolean)) return;
     setBusy(true);
     setError('');
     try {
@@ -314,9 +361,9 @@ export function PublicFormPage({ slug }) {
       {error && <div className="error-banner" role="alert">{error}</div>}
       <div className="public-form-questions">{form.fields.map((field) => <div className="public-form-question" key={field.id}>
         <span id={`${field.id}-label`}>{field.label}{field.required && <i aria-hidden="true"> *</i>}</span>
-        <FormQuestion field={field} value={answers[field.id]} onChange={(value) => setAnswers((current) => ({ ...current, [field.id]: value }))}/>
+        <FormQuestion field={field} value={answers[field.id]} uploading={uploadingFields[field.id]} onFileChange={(file) => uploadResponseFile(field, file)} onChange={(value) => setAnswers((current) => ({ ...current, [field.id]: value }))}/>
       </div>)}</div>
-      <footer><button className="button primary" type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" size={15}/> : <Send size={15}/>}Submit response</button><small>Your response is sent securely to the form owner.</small></footer>
+      <footer><button className="button primary" type="submit" disabled={busy||Object.values(uploadingFields).some(Boolean)}>{busy||Object.values(uploadingFields).some(Boolean) ? <LoaderCircle className="spin" size={15}/> : <Send size={15}/>}Submit response</button><small>Your response is sent securely to the form owner.</small></footer>
     </form>
   </main>;
 }

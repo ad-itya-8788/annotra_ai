@@ -797,6 +797,8 @@ table th,table td {
 .forms-editor { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
 .forms-editor>label,.forms-question-grid>label { min-width: 0; display: flex; flex-direction: column; gap: 6px; color: #38547f; font-size: 10px; font-weight: 700; }
 .forms-editor input:not([type="checkbox"]),.forms-editor select,.forms-editor textarea,.public-form-card input:not([type="checkbox"]):not([type="radio"]),.public-form-card select,.public-form-card textarea { width: 100%; min-width: 0; min-height: 38px; padding: 9px 10px; border: 1px solid #dfe7f5; border-radius: 7px; color: #244578; background: #fff; font-size: 11px; font-weight: 500; }
+.forms-editor input::placeholder,.forms-editor textarea::placeholder,.public-form-card input::placeholder,.public-form-card textarea::placeholder { color: #9aa9c2; }
+.forms-file-hint { grid-column: 1 / -1; color: #7d8eaa; font-size: 9px; line-height: 1.5; }
 .forms-editor textarea,.public-form-card textarea { resize: vertical; }
 .forms-editor input:focus-visible,.forms-editor select:focus-visible,.forms-editor textarea:focus-visible,.public-form-card input:focus-visible,.public-form-card select:focus-visible,.public-form-card textarea:focus-visible { border-color: #7f63f5; outline: 3px solid rgba(112,79,245,.14); outline-offset: 1px; }
 .forms-slug-field { min-width: 0; height: 38px; display: flex; align-items: center; overflow: hidden; border: 1px solid #dfe7f5; border-radius: 7px; background: #fff; }
@@ -838,6 +840,8 @@ table th,table td {
 .public-form-card input[type="radio"],.public-form-card input[type="checkbox"] { width: 16px; height: 16px; flex: 0 0 auto; margin: 0; accent-color: #009b62; }
 .public-form-choices { display: flex; flex-direction: column; gap: 9px; padding: 4px 1px; }
 .public-form-choices label { display: flex; align-items: center; gap: 8px; color: #405c7e; font-size: 11px; cursor: pointer; }
+.public-form-card input[type="file"] { min-height: 44px; border-style: dashed; background: #fbfcff; }
+.public-form-file-status { color: #607995; font-size: 10px; }
 .public-form-card>footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 24px 19px; border-top: 1px solid #edf3ef; }
 .public-form-card>footer small { color: #819187; font-size: 9px; }
 .public-form-card:not(form) { padding: 28px; text-align: center; }

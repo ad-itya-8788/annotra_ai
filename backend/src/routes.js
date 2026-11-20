@@ -22,6 +22,14 @@ const registrationLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, stan
 const registrationOtpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 3, standardHeaders: true, legacyHeaders: false });
 const registrationVerifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false });
 const publicFormSubmissionLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false });
+const formResponseUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 4 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, callback) => {
+    const valid = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'].includes(file.mimetype);
+    callback(valid ? null : Object.assign(new Error('Choose a PDF, DOC, DOCX, JPG, PNG, or WebP file.'), { status: 400 }), valid);
+  },
+});
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024, files: 1 },
@@ -314,6 +322,21 @@ router.get('/public/forms/:slug', asyncRoute(async (req, res) => {
   res.json({ data: rows[0] });
 }));
 
+router.post('/public/forms/:slug/uploads/:fieldId', publicFormSubmissionLimiter, formResponseUpload.single('file'), asyncRoute(async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT fields FROM custom_forms WHERE slug=$1 AND is_published=TRUE',
+    [req.params.slug],
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'This form is not available.' });
+  if (!rows[0].fields.some((field) => field.id === req.params.fieldId && field.type === 'file')) {
+    return res.status(404).json({ error: 'This file upload field is not available.' });
+  }
+  if (!req.file) return res.status(400).json({ error: 'Choose a file to upload.' });
+  const stored = await uploadFile(req.file, 'form-responses');
+  const name = req.file.originalname.split(/[\\/]/).pop().slice(0, 200) || 'Uploaded file';
+  res.status(201).json({ data: { name, url: stored.fileUrl } });
+}));
+
 router.post('/public/forms/:slug/responses', publicFormSubmissionLimiter, asyncRoute(async (req, res) => {
   const { rows } = await pool.query(
     'SELECT id,fields FROM custom_forms WHERE slug=$1 AND is_published=TRUE',
@@ -322,6 +345,18 @@ router.post('/public/forms/:slug/responses', publicFormSubmissionLimiter, asyncR
   if (!rows[0]) return res.status(404).json({ error: 'This form is not available.' });
   const answers = parseFormInput((value) => normalizeFormAnswers(rows[0].fields, value), req.body?.answers, res);
   if (!answers) return;
+  const cdnBaseUrl = config.bunny.cdnUrl
+    ? (config.bunny.cdnUrl.startsWith('http') ? config.bunny.cdnUrl : `https://${config.bunny.cdnUrl}`).replace(/\/$/, '')
+    : '';
+  for (const field of rows[0].fields.filter((item) => item.type === 'file')) {
+    const file = answers[field.id];
+    if (!file) continue;
+    const prefix = `${cdnBaseUrl}/form-responses/`;
+    const fileName = file.url.startsWith(prefix) ? file.url.slice(prefix.length) : '';
+    if (!cdnBaseUrl || !/^[0-9a-f-]{36}\.(pdf|doc|docx|jpg|png|webp)$/i.test(fileName)) {
+      return res.status(400).json({ error: `Upload a valid file for "${field.label}".` });
+    }
+  }
   await pool.query(
     'INSERT INTO custom_form_responses (form_id,answers) VALUES ($1,$2::jsonb)',
     [rows[0].id, JSON.stringify(answers)],
@@ -1366,7 +1401,7 @@ router.get('/reports/summary', permission('reports.view'), asyncRoute(async (_re
 }));
 
 router.use((error,req,res,_next)=>{
-  if(error instanceof multer.MulterError)return res.status(error.code==='LIMIT_FILE_SIZE'?413:400).json({error:error.code==='LIMIT_FILE_SIZE'?(req.path.startsWith('/auth/register/')?'File must be no larger than 5 MB.':'File must be no larger than 10 MB.'):error.message});
+  if(error instanceof multer.MulterError)return res.status(error.code==='LIMIT_FILE_SIZE'?413:400).json({error:error.code==='LIMIT_FILE_SIZE'?(req.path.startsWith('/auth/register/')?'File must be no larger than 5 MB.':req.path.startsWith('/public/forms/')?'File must be no larger than 4 MB.':'File must be no larger than 10 MB.'):error.message});
   if(error.code==='23505')return res.status(409).json({error:'A record with the same unique value already exists.'});
   if(error.code==='23503'||error.code==='23514')return res.status(400).json({error:'One or more supplied values are not valid for this record.'});
   const status=Number(error.status)||500;

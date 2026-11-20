@@ -50,7 +50,7 @@ export async function deleteFile(fileUrl) {
   }
   const parsed = new URL(fileUrl);
   const cdnHost = cdnUrl.replace(/^https?:\/\//,'').split('/')[0];
-  if (parsed.hostname !== cdnHost || !/^\/(employee-documents|project-attachments)\/[a-f0-9-]+\.[a-z0-9]+$/i.test(parsed.pathname)) {
+  if (parsed.hostname !== cdnHost || !/^\/(employee-documents|project-attachments|form-responses)\/[a-f0-9-]+\.[a-z0-9]+$/i.test(parsed.pathname)) {
     throw Object.assign(new Error('The stored URL is not a valid ProjectFlow Bunny CDN file.'),{status:400});
   }
   const host = region ? `${region}.storage.bunnycdn.com` : 'storage.bunnycdn.com';

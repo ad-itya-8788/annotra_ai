@@ -51,9 +51,9 @@ app.get('/sitemap.xml', (_req, res) => {
 app.get('/api/health', async (_req,res)=>{
   try {
     await pool.query('SELECT 1');
-    res.json({status:'ok',database:'connected'});
+    res.json({status:'ok',database:'connected',message:'Database connected and everything is running.'});
   } catch {
-    res.status(503).json({status:'error',database:'unavailable'});
+    res.status(503).json({status:'error',database:'unavailable',message:'Server is running, but the database connection is unavailable.'});
   }
 });
 app.use('/api',router);
@@ -68,8 +68,18 @@ if (config.nodeEnv === 'production' && existsSync(frontendDist)) {
     if (!req.accepts('html')) return next();
     return res.sendFile(resolve(frontendDist, 'index.html'));
   });
-} else if (config.nodeEnv === 'production') {
-  console.warn(`Frontend build not found at ${frontendDist}; configure a static host fallback or run the frontend build.`);
+} else {
+  if (config.nodeEnv === 'production') {
+    console.warn(`Frontend build not found at ${frontendDist}; configure a static host fallback or run the frontend build.`);
+  }
+  app.get('/', async (_req,res)=>{
+    try {
+      await pool.query('SELECT 1');
+      res.type('text/plain').send('Database connected and everything is running.');
+    } catch {
+      res.status(503).type('text/plain').send('Backend is running, but the database connection is unavailable.');
+    }
+  });
 }
 app.use((error,_req,res,_next)=>{
   console.error(error);

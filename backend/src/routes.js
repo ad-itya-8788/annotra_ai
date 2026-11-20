@@ -77,61 +77,26 @@ function parseFormInput(validator, value, res) {
   }
 }
 
-function parseRegistration(body) {
+export function parseRegistration(body) {
   const fullName = required(body.fullName, 'Full name');
   if (fullName.length > 120) throw Object.assign(new Error('Full name must be 120 characters or fewer.'), { status: 400 });
-  const email = required(body.email, 'Email address').toLowerCase();
-  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw Object.assign(new Error('Enter a valid email address.'), { status: 400 });
-  }
   const mobile = cleanMobile(body.mobile);
   if (!mobile) throw Object.assign(new Error('Enter a valid Indian mobile number.'), { status: 400 });
   const password = String(body.password || '');
   if (password.length < 12 || password.length > 128 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
     throw Object.assign(new Error('Password must be 12–128 characters and include lowercase, uppercase, and numeric characters.'), { status: 400 });
   }
-  if (String(body.confirmPassword || '') !== password) {
-    throw Object.assign(new Error('Passwords do not match.'), { status: 400 });
-  }
-  const experienceYears = Number(body.experienceYears || 0);
-  if (!Number.isFinite(experienceYears) || experienceYears < 0 || experienceYears > 70) {
-    throw Object.assign(new Error('Experience must be between 0 and 70 years.'), { status: 400 });
-  }
-  const linkedinUrl = text(body.linkedinUrl, 300);
-  if (linkedinUrl && !/^https:\/\/(www\.)?linkedin\.com\//i.test(linkedinUrl)) {
-    throw Object.assign(new Error('Enter a valid HTTPS LinkedIn profile URL.'), { status: 400 });
-  }
-  return {
-    fullName, email, mobile, password,
-    highestQualification: text(body.highestQualification, 120),
-    skills: Array.isArray(body.skills) ? csvArray(body.skills) : csvArray(String(body.skills || '').split(',')),
-    experienceYears,
-    city: text(body.city, 120),
-    linkedinUrl,
-  };
+  return { fullName, mobile, password };
 }
 
 router.post('/auth/register/send-otp', registrationLimiter, registrationOtpLimiter, asyncRoute(async (req, res) => {
   const registration = parseRegistration(req.body);
   const { rows: duplicates } = await pool.query(
-    `SELECT email,mobile FROM employees WHERE LOWER(email)=LOWER($1) OR mobile=$2
-     UNION ALL
-     SELECT email,mobile FROM employee_registration_otps
-     WHERE (LOWER(email)=LOWER($1) OR mobile=$2)
-       AND NOT (LOWER(email)=LOWER($1) AND mobile=$2)
-     LIMIT 1`,
-    [registration.email, registration.mobile],
+    'SELECT mobile FROM employees WHERE mobile=$1 LIMIT 1',
+    [registration.mobile],
   );
   if (duplicates[0]) {
-    const duplicateEmail = duplicates[0].email.toLowerCase() === registration.email;
-    const duplicateMobile = duplicates[0].mobile === registration.mobile;
-    return res.status(409).json({
-      error: duplicateEmail && duplicateMobile
-        ? 'An account already uses this email address and mobile number.'
-        : duplicateEmail
-          ? 'An account already uses this email address.'
-          : 'An account already uses this mobile number.',
-    });
+    return res.status(409).json({ error: 'An account already uses this mobile number.' });
   }
   const { rows: recentRequests } = await pool.query(
     `SELECT COUNT(*)::int AS count FROM employee_registration_otps
@@ -148,21 +113,17 @@ router.post('/auth/register/send-otp', registrationLimiter, registrationOtpLimit
   await pool.query('DELETE FROM employee_registration_otps WHERE expires_at<NOW()');
   await pool.query(
     `INSERT INTO employee_registration_otps
-       (full_name,email,mobile,password_hash,highest_qualification,skills,experience_years,city,linkedin_url,verification_id,expires_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW()+INTERVAL '5 minutes')`,
-    [registration.fullName,registration.email,registration.mobile,passwordHash,registration.highestQualification,registration.skills,registration.experienceYears,registration.city,registration.linkedinUrl,verificationId],
+       (full_name,mobile,password_hash,verification_id,expires_at)
+     VALUES ($1,$2,$3,$4,NOW()+INTERVAL '5 minutes')`,
+    [registration.fullName,registration.mobile,passwordHash,verificationId],
   );
   res.json({ message: 'Verification code sent.', expiresInSeconds: 300, resendAfterSeconds: 60, developmentBypass: verificationId.startsWith('dev:') });
 }));
 
-router.post('/auth/register/verify-otp', registrationVerifyLimiter, resumeUpload.fields([{name:'resume',maxCount:1},{name:'profilePhoto',maxCount:1}]), asyncRoute(async (req, res) => {
+router.post('/auth/register/verify-otp', registrationVerifyLimiter, asyncRoute(async (req, res) => {
   const mobile = cleanMobile(req.body.mobile);
   const code = String(req.body.code || '');
   if (!mobile || !/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter your mobile number and six-digit verification code.' });
-  const uploadedFiles = req.files || {};
-  if (!uploadedFiles.profilePhoto?.[0]) {
-    return res.status(400).json({ error: 'A profile photo is required to create an account.' });
-  }
   const { rows: attempts } = await pool.query(
     `UPDATE employee_registration_otps SET attempts=attempts+1
      WHERE id=(
@@ -170,7 +131,7 @@ router.post('/auth/register/verify-otp', registrationVerifyLimiter, resumeUpload
        WHERE mobile=$1 AND expires_at>NOW() AND attempts<5
        ORDER BY created_at DESC LIMIT 1
      )
-     RETURNING id,full_name,email,mobile,password_hash,highest_qualification,skills,experience_years,city,linkedin_url,verification_id,attempts`,
+     RETURNING id,full_name,mobile,password_hash,verification_id,attempts`,
     [mobile],
   );
   const registration = attempts[0];
@@ -180,47 +141,29 @@ router.post('/auth/register/verify-otp', registrationVerifyLimiter, resumeUpload
     : await verifyOtp(mobile, registration.verification_id, code);
   if (!accepted) return res.status(400).json({ error: 'The verification code is incorrect.' });
 
-  let storedResume;
-  let storedPhoto;
-  try {
-    if (uploadedFiles.resume?.[0]) storedResume = await savePrivateUpload(uploadedFiles.resume[0]);
-    if (uploadedFiles.profilePhoto?.[0]) storedPhoto = await savePrivateUpload(uploadedFiles.profilePhoto[0]);
-    const employee = await inTransaction(async (client) => {
-      const { rows: duplicates } = await client.query(
-        'SELECT 1 FROM employees WHERE LOWER(email)=LOWER($1) OR mobile=$2 LIMIT 1',
-        [registration.email, registration.mobile],
-      );
-      if (duplicates[0]) {
-        await client.query('DELETE FROM employee_registration_otps WHERE id=$1', [registration.id]);
-        throw Object.assign(new Error('An account already uses this email address or mobile number.'), { status: 409 });
-      }
-      const { rows } = await client.query(
-        `INSERT INTO employees
-           (full_name,email,mobile,employee_type,role_id,status,password_hash,highest_qualification,skills,experience_years,city,address,linkedin_url,resume_url,profile_photo_url)
-         SELECT $1,$2,$3,'Annotator',r.id,'active',$4,$5,$6,$7,$8,$8,$9,$10,$11
-         FROM roles r WHERE r.name='Annotator'
-         RETURNING id`,
-        [registration.full_name,registration.email,registration.mobile,registration.password_hash,registration.highest_qualification,registration.skills,registration.experience_years,registration.city,registration.linkedin_url,storedResume?`/api/private-files/${storedResume.fileName}`:null,storedPhoto?`/api/private-files/${storedPhoto.fileName}`:null],
-      );
-      if (!rows[0]) throw new Error('The restricted Annotator role is not configured.');
-      for (const [documentType,stored] of [['resume',storedResume],['profile-photo',storedPhoto]]) {
-        if (!stored) continue;
-        await client.query(
-          `INSERT INTO employee_documents (employee_id,document_type,file_name,file_url,mime_type,size_bytes)
-           VALUES ($1,$2,$3,$4,$5,$6)`,
-          [rows[0].id,documentType,stored.originalName,`/api/private-files/${stored.fileName}`,stored.mimeType,stored.sizeBytes],
-        );
-      }
-      await client.query('INSERT INTO audit_logs (action,target_employee_id) VALUES ($1,$2)', ['employee.registered',rows[0].id]);
-      await client.query('DELETE FROM employee_registration_otps WHERE mobile=$1', [registration.mobile]);
-      return rows[0];
-    });
-    if (!employee) throw new Error('Registration could not be completed.');
-  } catch (error) {
-    if (storedResume) await removePrivateFile(storedResume.filePath);
-    if (storedPhoto) await removePrivateFile(storedPhoto.filePath);
-    throw error;
-  }
+  const employee = await inTransaction(async (client) => {
+    const { rows: duplicates } = await client.query(
+      'SELECT 1 FROM employees WHERE mobile=$1 LIMIT 1',
+      [registration.mobile],
+    );
+    if (duplicates[0]) {
+      await client.query('DELETE FROM employee_registration_otps WHERE id=$1', [registration.id]);
+      throw Object.assign(new Error('An account already uses this mobile number.'), { status: 409 });
+    }
+    const { rows } = await client.query(
+      `INSERT INTO employees
+         (full_name,email,mobile,employee_type,role_id,status,password_hash)
+       SELECT $1,NULL,$2,'Annotator',r.id,'active',$3
+       FROM roles r WHERE r.name='Annotator'
+       RETURNING id`,
+      [registration.full_name,registration.mobile,registration.password_hash],
+    );
+    if (!rows[0]) throw new Error('The restricted Annotator role is not configured.');
+    await client.query('INSERT INTO audit_logs (action,target_employee_id) VALUES ($1,$2)', ['employee.registered',rows[0].id]);
+    await client.query('DELETE FROM employee_registration_otps WHERE mobile=$1', [registration.mobile]);
+    return rows[0];
+  });
+  if (!employee) throw new Error('Registration could not be completed.');
   res.status(201).json({ message: 'Your mobile number is verified. Registration is complete.' });
 }));
 
@@ -339,11 +282,16 @@ router.post('/auth/verify-otp', verifyLimiter, asyncRoute(async (req, res) => {
 }));
 
 router.get('/auth/session', asyncRoute(async(req,res)=>{
+  res.set('Cache-Control', 'no-store');
   if(req.session.user){
     if(!await hasPermission(req.session.user,'dashboard.view')){
       await new Promise((resolve)=>req.session.destroy(()=>resolve()));
       res.clearCookie('projectflow.sid');
       return res.json({user:null,csrfToken:null});
+    }
+    if(!req.session.csrfToken){
+      req.session.csrfToken=randomBytes(32).toString('hex');
+      await saveSession(req);
     }
   }
   res.json({user:req.session.user||null,csrfToken:req.session.csrfToken||null});

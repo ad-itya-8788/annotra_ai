@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS role_permissions (
 CREATE TABLE IF NOT EXISTS employees (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   full_name TEXT NOT NULL,
-  email TEXT NOT NULL UNIQUE,
+  email TEXT UNIQUE,
   mobile TEXT NOT NULL UNIQUE,
   date_of_birth DATE,
   gender TEXT,
@@ -187,7 +187,7 @@ CREATE TABLE IF NOT EXISTS otp_sessions (
 CREATE TABLE IF NOT EXISTS employee_registration_otps (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   full_name TEXT NOT NULL,
-  email TEXT NOT NULL,
+  email TEXT,
   mobile TEXT NOT NULL,
   password_hash TEXT NOT NULL,
   highest_qualification TEXT NOT NULL DEFAULT '',

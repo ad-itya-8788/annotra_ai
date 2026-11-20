@@ -19,6 +19,7 @@ try {
 
   const { rows: emailDuplicates } = await pool.query(
     `SELECT LOWER(email) AS email FROM employees
+     WHERE email IS NOT NULL
      GROUP BY LOWER(email) HAVING COUNT(*) > 1 LIMIT 1`,
   );
   if (emailDuplicates.length) {

@@ -34,7 +34,7 @@ CREATE INDEX IF NOT EXISTS audit_logs_created_at_idx ON audit_logs (created_at D
 CREATE TABLE IF NOT EXISTS employee_registration_otps (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   full_name TEXT NOT NULL,
-  email TEXT NOT NULL,
+  email TEXT,
   mobile TEXT NOT NULL,
   password_hash TEXT NOT NULL,
   highest_qualification TEXT NOT NULL DEFAULT '',

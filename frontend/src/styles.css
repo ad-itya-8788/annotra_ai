@@ -712,6 +712,8 @@ table th,table td {
 .auth-card .auth-foot { margin-top: 21px; border-color: #eaf1ed; color: #899a91; font-size: 10px; }
 .auth-card input:not([type="file"]) { width: 100%; min-width: 0; height: 46px; padding: 0 14px; border: 1px solid #dceae4; border-radius: 10px; color: #18374a; background: #fcfefd; font-size: 12px; }
 .auth-card input:focus-visible { border-color: #00a66a; outline: 3px solid rgba(0,155,98,.14); outline-offset: 1px; }
+.auth-card .mobile-field input:not([type="file"]),.auth-card .password-field input:not([type="file"]) { width: 0; min-width: 0; height: 100%; flex: 1; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.auth-card .mobile-field input:focus-visible,.auth-card .password-field input:focus-visible { border: 0; outline: 0; box-shadow: none; }
 .auth-card input[type="file"] { width: 100%; min-width: 0; padding: 9px; border: 1px dashed #cfe2d9; border-radius: 8px; color: #526c61; background: #fcfefd; font-size: 10px; }
 .auth-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin: -4px 0 19px; border: 1px solid #e4eee8; border-radius: 12px; background: #f5faf7; }
 .auth-tabs button { min-height: 38px; border: 0; border-radius: 9px; color: #698073; background: transparent; font-size: 11px; font-weight: 700; cursor: pointer; }
@@ -746,6 +748,20 @@ table th,table td {
   .auth-card-signup { max-height: calc(100svh - 28px); }
   .auth-card-signup .signup-form { grid-template-columns: minmax(0,1fr); }
   .auth-card-signup .signup-form>label,.auth-card-signup .signup-form>input,.auth-card-signup .signup-form .mobile-field,.auth-card-signup .signup-form .password-field { grid-column: 1; }
+  .auth-page-signup .auth-main { min-height: 100svh; align-content: start; padding-top: max(14px,env(safe-area-inset-top)); padding-bottom: max(24px,env(safe-area-inset-bottom)); }
+  .auth-page-signup .auth-card-signup { max-height: none; overflow: visible; }
+  .auth-card-signup .signup-form { display: flex; flex-direction: column; gap: 7px; }
+  .auth-card-signup .signup-form>label { margin-top: 8px; font-size: 12px; }
+  .auth-card-signup input:not([type="file"]),.auth-card-signup .mobile-field,.auth-card-signup .password-field { height: 50px; }
+  .auth-card-signup input:not([type="file"]),.auth-card-signup .mobile-field input { font-size: 16px; }
+  .auth-card-signup input[type="file"] { min-height: 50px; padding: 8px; font-size: 12px; }
+  .auth-card-signup input[type="file"]::file-selector-button { min-height: 32px; margin-right: 9px; padding: 0 10px; border: 0; border-radius: 6px; color: #087c52; background: #e9f7ef; font: inherit; }
+  .auth-card-signup .password-field button { width: 48px; }
+  .auth-card-signup .signup-form .wide { min-height: 50px; margin-top: 12px; }
+  .auth-card input:not([type="file"]):not(.otp-input) { font-size: 16px; }
+  .auth-card .mobile-field input { font-size: 16px; }
+  .auth-card .auth-form .wide { min-height: 48px; }
+  .auth-tabs button { min-height: 44px; }
   .auth-card-top { margin: -2px 0 20px; padding-bottom: 11px; }
   .auth-lock-icon { width: 38px; height: 38px; margin-bottom: 12px; border-radius: 12px; }
   .auth-card-heading h2 { margin-top: 6px; font-size: 23px; }
@@ -758,7 +774,7 @@ table th,table td {
   .auth-card { padding: 19px 17px; }
   .auth-card-top { margin-bottom: 17px; }
   .auth-card-heading p { font-size: 10px; }
-  .auth-card .auth-form .wide { min-height: 42px; }
+  .auth-card .auth-form .wide { min-height: 48px; }
 }
 
 .forms-page { display: flex; flex-direction: column; gap: 14px; }

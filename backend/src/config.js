@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -6,6 +7,11 @@ dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 
 const envValue = (name, fallback = '') => process.env[name]?.trim() || fallback;
 const requestedPrivateFileMaxBytes = Number(process.env.PRIVATE_FILE_MAX_BYTES || 5 * 1024 * 1024);
+const databaseSslCaPath = process.env.DB_SSL_CA_PATH?.trim();
+const databaseSslRejectUnauthorized = process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false';
+const databaseSslCa = databaseSslCaPath
+  ? readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', databaseSslCaPath), 'utf8')
+  : undefined;
 
 export const config = {
   port: Number(process.env.PORT || 3001),
@@ -18,7 +24,12 @@ export const config = {
     database: process.env.DATABASE_URL ? undefined : process.env.DB_NAME || 'projectflow',
     user: process.env.DATABASE_URL ? undefined : process.env.DB_USER || 'postgres',
     password: process.env.DATABASE_URL ? undefined : process.env.DB_PASSWORD || 'postgres',
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
+    ssl: process.env.DB_SSL === 'true'
+      ? {
+          rejectUnauthorized: databaseSslRejectUnauthorized,
+          ...(databaseSslCa ? { ca: databaseSslCa } : {}),
+        }
+      : undefined,
   },
   sessionSecret: process.env.SESSION_SECRET,
   messageCentral: {

@@ -1,0 +1,29 @@
+{
+  "name": "projectflow-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "seed": "node src/seed.js",
+    "db:migrate": "node src/migrate.js",
+    "db:schema": "node src/seed.js --schema-only",
+    "db:super-admin": "node src/initializeSuperAdmin.js",
+    "db:recover-super-admin": "node src/recoverSuperAdminPassword.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "connect-pg-simple": "^10.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "express-session": "^1.18.1",
+    "helmet": "^8.0.0",
+    "multer": "^2.5.0",
+    "nodemailer": "^10.2.1",
+    "pg": "^8.13.1",
+    "socket.io": "^4.8.4"
+  }
+}

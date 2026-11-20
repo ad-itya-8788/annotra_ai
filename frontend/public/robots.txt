@@ -1,0 +1,15 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /dashboard
+Disallow: /employees
+Disallow: /projects
+Disallow: /vendors
+Disallow: /applications
+Disallow: /announcements
+Disallow: /settings
+Disallow: /roles-and-permissions
+Disallow: /audit-logs
+Disallow: /email-invitations
+
+Sitemap: https://annotra.ai/sitemap.xml

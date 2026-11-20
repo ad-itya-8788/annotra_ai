@@ -1,0 +1,1428 @@
+import { Router } from 'express';
+import { randomBytes } from 'node:crypto';
+import rateLimit from 'express-rate-limit';
+import multer from 'multer';
+import nodemailer from 'nodemailer';
+import { pool, inTransaction } from './db.js';
+import { config } from './config.js';
+import { asyncRoute, hasPermission, permission, requireAuth, requireCsrf } from './middleware.js';
+import { hashPassword, verifyPassword } from './password.js';
+import { sendOtp, verifyOtp } from './services/messageCentral.js';
+import { readPrivateFile, removePrivateFile, savePrivateUpload } from './services/privateStorage.js';
+import { deleteFile, uploadFile } from './services/storage.js';
+import { normalizeFormAnswers, normalizeFormDefinition } from './formSchemas.js';
+
+export const router = Router();
+router.use(requireCsrf);
+
+const otpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 3, standardHeaders: true, legacyHeaders: false });
+const verifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false });
+const passwordLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false });
+const registrationLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: true, legacyHeaders: false });
+const registrationOtpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 3, standardHeaders: true, legacyHeaders: false });
+const registrationVerifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false });
+const publicFormSubmissionLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, callback) => {
+    const valid = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'].includes(file.mimetype);
+    callback(valid ? null : Object.assign(new Error('Unsupported file type.'), { status: 400 }), valid);
+  },
+});
+const resumeUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: config.privateFileMaxBytes, files: 2 },
+  fileFilter: (_req, file, callback) => {
+    const valid = ['resume','file'].includes(file.fieldname)
+      ? ['application/pdf','application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document'].includes(file.mimetype)
+      : file.fieldname === 'profilePhoto' && ['image/jpeg','image/png','image/webp'].includes(file.mimetype);
+    callback(valid ? null : Object.assign(new Error('Choose a PDF, DOC, DOCX resume, or JPG, PNG, WebP profile photo.'), { status: 400 }), valid);
+  },
+});
+
+const cleanMobile = (value) => {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (digits.length === 10 && /^[6-9]/.test(digits)) return `+91${digits}`;
+  if (digits.length === 12 && digits.startsWith('91') && /^[6-9]/.test(digits.slice(2))) return `+${digits}`;
+  return null;
+};
+const validDateOnly = (value) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+};
+const text = (value, max = 5000) => typeof value === 'string' ? value.trim().slice(0, max) : '';
+const required = (value, label) => {
+  const result = text(value);
+  if (!result) throw Object.assign(new Error(`${label} is required.`), { status: 400 });
+  return result;
+};
+const csvArray = (value) => Array.isArray(value) ? value.map((item) => text(item, 100)).filter(Boolean) : [];
+const canGrantPermissions = (user, codes) => user.role === 'Super Admin'
+  || codes.every((code) => user.permissions?.includes(code));
+const sessionUser = (row) => ({ id: row.id, name: row.full_name, mobile: row.mobile, role: row.role_name, permissions: row.permissions || [] });
+const saveSession = (req) => new Promise((resolve, reject) => {
+  req.session.save((error) => error ? reject(error) : resolve());
+});
+function parseFormInput(validator, value, res) {
+  try {
+    return validator(value);
+  } catch (error) {
+    if (error.status === 400) {
+      res.status(400).json({ error: error.message });
+      return null;
+    }
+    throw error;
+  }
+}
+
+function parseRegistration(body) {
+  const fullName = required(body.fullName, 'Full name');
+  if (fullName.length > 120) throw Object.assign(new Error('Full name must be 120 characters or fewer.'), { status: 400 });
+  const email = required(body.email, 'Email address').toLowerCase();
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw Object.assign(new Error('Enter a valid email address.'), { status: 400 });
+  }
+  const mobile = cleanMobile(body.mobile);
+  if (!mobile) throw Object.assign(new Error('Enter a valid Indian mobile number.'), { status: 400 });
+  const password = String(body.password || '');
+  if (password.length < 12 || password.length > 128 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
+    throw Object.assign(new Error('Password must be 12–128 characters and include lowercase, uppercase, and numeric characters.'), { status: 400 });
+  }
+  if (String(body.confirmPassword || '') !== password) {
+    throw Object.assign(new Error('Passwords do not match.'), { status: 400 });
+  }
+  const experienceYears = Number(body.experienceYears || 0);
+  if (!Number.isFinite(experienceYears) || experienceYears < 0 || experienceYears > 70) {
+    throw Object.assign(new Error('Experience must be between 0 and 70 years.'), { status: 400 });
+  }
+  const linkedinUrl = text(body.linkedinUrl, 300);
+  if (linkedinUrl && !/^https:\/\/(www\.)?linkedin\.com\//i.test(linkedinUrl)) {
+    throw Object.assign(new Error('Enter a valid HTTPS LinkedIn profile URL.'), { status: 400 });
+  }
+  return {
+    fullName, email, mobile, password,
+    highestQualification: text(body.highestQualification, 120),
+    skills: Array.isArray(body.skills) ? csvArray(body.skills) : csvArray(String(body.skills || '').split(',')),
+    experienceYears,
+    city: text(body.city, 120),
+    linkedinUrl,
+  };
+}
+
+router.post('/auth/register/send-otp', registrationLimiter, registrationOtpLimiter, asyncRoute(async (req, res) => {
+  const registration = parseRegistration(req.body);
+  const { rows: duplicates } = await pool.query(
+    `SELECT email,mobile FROM employees WHERE LOWER(email)=LOWER($1) OR mobile=$2
+     UNION ALL
+     SELECT email,mobile FROM employee_registration_otps
+     WHERE (LOWER(email)=LOWER($1) OR mobile=$2)
+       AND NOT (LOWER(email)=LOWER($1) AND mobile=$2)
+     LIMIT 1`,
+    [registration.email, registration.mobile],
+  );
+  if (duplicates[0]) {
+    const duplicateEmail = duplicates[0].email.toLowerCase() === registration.email;
+    const duplicateMobile = duplicates[0].mobile === registration.mobile;
+    return res.status(409).json({
+      error: duplicateEmail && duplicateMobile
+        ? 'An account already uses this email address and mobile number.'
+        : duplicateEmail
+          ? 'An account already uses this email address.'
+          : 'An account already uses this mobile number.',
+    });
+  }
+  const { rows: recentRequests } = await pool.query(
+    `SELECT COUNT(*)::int AS count FROM employee_registration_otps
+     WHERE mobile=$1 AND created_at>NOW()-INTERVAL '15 minutes'`,
+    [registration.mobile],
+  );
+  if (recentRequests[0].count >= 3) {
+    return res.status(429).json({ error: 'Too many verification requests. Please wait before requesting another code.' });
+  }
+  const verificationId = config.devAuthEnabled && config.nodeEnv !== 'production'
+    ? `dev:${randomBytes(18).toString('hex')}`
+    : await sendOtp(registration.mobile);
+  const passwordHash = await hashPassword(registration.password);
+  await pool.query('DELETE FROM employee_registration_otps WHERE expires_at<NOW()');
+  await pool.query(
+    `INSERT INTO employee_registration_otps
+       (full_name,email,mobile,password_hash,highest_qualification,skills,experience_years,city,linkedin_url,verification_id,expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW()+INTERVAL '5 minutes')`,
+    [registration.fullName,registration.email,registration.mobile,passwordHash,registration.highestQualification,registration.skills,registration.experienceYears,registration.city,registration.linkedinUrl,verificationId],
+  );
+  res.json({ message: 'Verification code sent.', expiresInSeconds: 300, resendAfterSeconds: 60, developmentBypass: verificationId.startsWith('dev:') });
+}));
+
+router.post('/auth/register/verify-otp', registrationVerifyLimiter, resumeUpload.fields([{name:'resume',maxCount:1},{name:'profilePhoto',maxCount:1}]), asyncRoute(async (req, res) => {
+  const mobile = cleanMobile(req.body.mobile);
+  const code = String(req.body.code || '');
+  if (!mobile || !/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter your mobile number and six-digit verification code.' });
+  const uploadedFiles = req.files || {};
+  if (!uploadedFiles.profilePhoto?.[0]) {
+    return res.status(400).json({ error: 'A profile photo is required to create an account.' });
+  }
+  const { rows: attempts } = await pool.query(
+    `UPDATE employee_registration_otps SET attempts=attempts+1
+     WHERE id=(
+       SELECT id FROM employee_registration_otps
+       WHERE mobile=$1 AND expires_at>NOW() AND attempts<5
+       ORDER BY created_at DESC LIMIT 1
+     )
+     RETURNING id,full_name,email,mobile,password_hash,highest_qualification,skills,experience_years,city,linkedin_url,verification_id,attempts`,
+    [mobile],
+  );
+  const registration = attempts[0];
+  if (!registration) return res.status(400).json({ error: 'Registration code expired or too many incorrect attempts. Request a new code.' });
+  const accepted = registration.verification_id.startsWith('dev:')
+    ? config.devAuthEnabled && config.nodeEnv !== 'production' && code === '000000'
+    : await verifyOtp(mobile, registration.verification_id, code);
+  if (!accepted) return res.status(400).json({ error: 'The verification code is incorrect.' });
+
+  let storedResume;
+  let storedPhoto;
+  try {
+    if (uploadedFiles.resume?.[0]) storedResume = await savePrivateUpload(uploadedFiles.resume[0]);
+    if (uploadedFiles.profilePhoto?.[0]) storedPhoto = await savePrivateUpload(uploadedFiles.profilePhoto[0]);
+    const employee = await inTransaction(async (client) => {
+      const { rows: duplicates } = await client.query(
+        'SELECT 1 FROM employees WHERE LOWER(email)=LOWER($1) OR mobile=$2 LIMIT 1',
+        [registration.email, registration.mobile],
+      );
+      if (duplicates[0]) {
+        await client.query('DELETE FROM employee_registration_otps WHERE id=$1', [registration.id]);
+        throw Object.assign(new Error('An account already uses this email address or mobile number.'), { status: 409 });
+      }
+      const { rows } = await client.query(
+        `INSERT INTO employees
+           (full_name,email,mobile,employee_type,role_id,status,password_hash,highest_qualification,skills,experience_years,city,address,linkedin_url,resume_url,profile_photo_url)
+         SELECT $1,$2,$3,'Annotator',r.id,'active',$4,$5,$6,$7,$8,$8,$9,$10,$11
+         FROM roles r WHERE r.name='Annotator'
+         RETURNING id`,
+        [registration.full_name,registration.email,registration.mobile,registration.password_hash,registration.highest_qualification,registration.skills,registration.experience_years,registration.city,registration.linkedin_url,storedResume?`/api/private-files/${storedResume.fileName}`:null,storedPhoto?`/api/private-files/${storedPhoto.fileName}`:null],
+      );
+      if (!rows[0]) throw new Error('The restricted Annotator role is not configured.');
+      for (const [documentType,stored] of [['resume',storedResume],['profile-photo',storedPhoto]]) {
+        if (!stored) continue;
+        await client.query(
+          `INSERT INTO employee_documents (employee_id,document_type,file_name,file_url,mime_type,size_bytes)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [rows[0].id,documentType,stored.originalName,`/api/private-files/${stored.fileName}`,stored.mimeType,stored.sizeBytes],
+        );
+      }
+      await client.query('INSERT INTO audit_logs (action,target_employee_id) VALUES ($1,$2)', ['employee.registered',rows[0].id]);
+      await client.query('DELETE FROM employee_registration_otps WHERE mobile=$1', [registration.mobile]);
+      return rows[0];
+    });
+    if (!employee) throw new Error('Registration could not be completed.');
+  } catch (error) {
+    if (storedResume) await removePrivateFile(storedResume.filePath);
+    if (storedPhoto) await removePrivateFile(storedPhoto.filePath);
+    throw error;
+  }
+  res.status(201).json({ message: 'Your mobile number is verified. Registration is complete.' });
+}));
+
+router.post('/auth/login', passwordLoginLimiter, asyncRoute(async (req, res) => {
+  const identifier = text(req.body.mobileOrEmail, 254);
+  const mobile = cleanMobile(identifier);
+  const email = mobile ? null : identifier.toLowerCase();
+  const password = String(req.body.password || '');
+  const rememberMe = req.body.rememberMe === true || req.body.remember === true;
+  if ((!mobile && (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) || !password || password.length > 128) {
+    return res.status(400).json({ error: 'Enter a valid mobile number or email address and password.' });
+  }
+  const { rows } = await pool.query(
+    `SELECT e.id,e.full_name,e.mobile,e.status,e.password_hash,r.name AS role_name,
+       COALESCE(array_agg(DISTINCT p.code) FILTER(WHERE p.code IS NOT NULL),'{}') AS permissions
+     FROM employees e JOIN roles r ON r.id=e.role_id
+     LEFT JOIN role_permissions rp ON rp.role_id=r.id
+     LEFT JOIN permissions p ON p.id=rp.permission_id
+     WHERE ($1::text IS NOT NULL AND e.mobile=$1) OR ($2::text IS NOT NULL AND LOWER(e.email)=LOWER($2))
+     GROUP BY e.id,r.id`,
+    [mobile,email],
+  );
+  const account = rows[0];
+  if (!account?.password_hash || !(await verifyPassword(password, account.password_hash))) {
+    return res.status(401).json({ error: 'The mobile number/email or password is incorrect.' });
+  }
+  if (account.status === 'pending') return res.status(403).json({ error: 'Your registration is awaiting Super Admin approval.' });
+  if (account.status === 'rejected') return res.status(403).json({ error: 'Your registration was not approved. Contact the administrator for help.' });
+  if (account.status !== 'active') return res.status(403).json({ error: 'This account is inactive. Contact the administrator for help.' });
+  await new Promise((resolve, reject) => req.session.regenerate((error) => error ? reject(error) : resolve()));
+  req.session.user = sessionUser(account);
+  req.session.csrfToken = randomBytes(32).toString('hex');
+  if (rememberMe) {
+    req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000;
+  } else {
+    req.session.cookie.maxAge = 8 * 60 * 60 * 1000;
+  }
+  await saveSession(req);
+  res.json({ user: req.session.user, csrfToken: req.session.csrfToken });
+}));
+
+router.post('/auth/send-otp', otpLimiter, asyncRoute(async (req, res) => {
+  const mobile = cleanMobile(req.body.mobile);
+  if (!mobile) return res.status(400).json({ error: 'Enter a valid Indian mobile number.' });
+  const { rows } = await pool.query(
+    `SELECT e.id,e.full_name,e.mobile,e.status,r.name AS role_name FROM employees e
+     JOIN roles r ON r.id=e.role_id WHERE e.mobile=$1`,
+    [mobile],
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'No account is registered with this mobile number.' });
+  if (rows[0].status === 'pending') return res.status(403).json({ error: 'Your registration is awaiting Super Admin approval.' });
+  if (rows[0].status === 'rejected') return res.status(403).json({ error: 'Your registration was not approved. Contact the administrator for help.' });
+  if (rows[0].status !== 'active') return res.status(403).json({ error: 'This account is inactive. Contact the administrator for help.' });
+  const { rows: recentRequests } = await pool.query(
+    `SELECT COUNT(*)::int AS count FROM otp_sessions
+     WHERE employee_id=$1 AND created_at>NOW()-INTERVAL '15 minutes'`,
+    [rows[0].id],
+  );
+  if (recentRequests[0].count >= 3) {
+    return res.status(429).json({ error: 'Too many verification requests. Please wait before requesting another code.' });
+  }
+  let verificationId;
+  if (config.devAuthEnabled && config.nodeEnv !== 'production') {
+    verificationId = `dev:${randomBytes(18).toString('hex')}`;
+  } else {
+    verificationId = await sendOtp(mobile);
+  }
+  await pool.query('DELETE FROM otp_sessions WHERE expires_at < NOW()');
+  await pool.query(
+    `INSERT INTO otp_sessions (employee_id,verification_id,expires_at)
+     VALUES ($1,$2,NOW()+INTERVAL '5 minutes')`,
+    [rows[0].id, verificationId],
+  );
+  res.json({ message: 'Verification code sent.', expiresInSeconds: 300, developmentBypass: config.devAuthEnabled && config.nodeEnv !== 'production' });
+}));
+
+router.post('/auth/verify-otp', verifyLimiter, asyncRoute(async (req, res) => {
+  const mobile = cleanMobile(req.body.mobile);
+  const code = String(req.body.code || '');
+  const rememberMe = req.body.rememberMe === true || req.body.remember === true;
+  if (!mobile || !/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter the registered mobile number and six-digit code.' });
+  const { rows } = await pool.query(
+    `SELECT s.id AS otp_id,s.verification_id,s.attempts,e.id,e.full_name,e.mobile,r.name AS role_name,
+       COALESCE(array_agg(DISTINCT p.code) FILTER (WHERE p.code IS NOT NULL),'{}') AS permissions
+     FROM otp_sessions s JOIN employees e ON e.id=s.employee_id
+     JOIN roles r ON r.id=e.role_id
+     LEFT JOIN role_permissions rp ON rp.role_id=r.id
+     LEFT JOIN permissions p ON p.id=rp.permission_id
+     WHERE e.mobile=$1 AND e.status='active' AND s.expires_at>NOW()
+     GROUP BY s.id,e.id,r.name,s.created_at
+     ORDER BY s.created_at DESC LIMIT 1`,
+    [mobile],
+  );
+  const attempt = rows[0];
+  if (!attempt) return res.status(400).json({ error: 'Code expired. Request a new code.' });
+  if (attempt.attempts >= 5) {
+    await pool.query('DELETE FROM otp_sessions WHERE id=$1', [attempt.otp_id]);
+    return res.status(429).json({ error: 'Too many incorrect attempts. Request a new code.' });
+  }
+  await pool.query('UPDATE otp_sessions SET attempts=attempts+1 WHERE id=$1', [attempt.otp_id]);
+  const accepted = attempt.verification_id.startsWith('dev:')
+    ? config.devAuthEnabled && config.nodeEnv !== 'production' && code === '000000'
+    : await verifyOtp(mobile, attempt.verification_id, code);
+  if (!accepted) return res.status(400).json({ error: 'The verification code is incorrect.' });
+  await pool.query('DELETE FROM otp_sessions WHERE id=$1', [attempt.otp_id]);
+  await new Promise((resolve, reject) => req.session.regenerate((error) => error ? reject(error) : resolve()));
+  req.session.user = sessionUser(attempt);
+  req.session.csrfToken = randomBytes(32).toString('hex');
+  if (rememberMe) {
+    req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000;
+  } else {
+    req.session.cookie.maxAge = 8 * 60 * 60 * 1000;
+  }
+  await saveSession(req);
+  res.json({ user: req.session.user, csrfToken: req.session.csrfToken });
+}));
+
+router.get('/auth/session', asyncRoute(async(req,res)=>{
+  if(req.session.user){
+    if(!await hasPermission(req.session.user,'dashboard.view')){
+      await new Promise((resolve)=>req.session.destroy(()=>resolve()));
+      res.clearCookie('projectflow.sid');
+      return res.json({user:null,csrfToken:null});
+    }
+  }
+  res.json({user:req.session.user||null,csrfToken:req.session.csrfToken||null});
+}));
+
+router.post('/auth/logout', asyncRoute(async (req, res) => {
+  if(req.session)await new Promise((resolve, reject) => req.session.destroy((error) => error ? reject(error) : resolve()));
+  res.clearCookie('projectflow.sid');
+  res.status(204).end();
+}));
+
+router.get('/public/forms/:slug', asyncRoute(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT title,description,slug,fields
+     FROM custom_forms WHERE slug=$1 AND is_published=TRUE`,
+    [req.params.slug],
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'This form is not available.' });
+  res.set('Cache-Control', 'no-store');
+  res.json({ data: rows[0] });
+}));
+
+router.post('/public/forms/:slug/responses', publicFormSubmissionLimiter, asyncRoute(async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT id,fields FROM custom_forms WHERE slug=$1 AND is_published=TRUE',
+    [req.params.slug],
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'This form is not available.' });
+  const answers = parseFormInput((value) => normalizeFormAnswers(rows[0].fields, value), req.body?.answers, res);
+  if (!answers) return;
+  await pool.query(
+    'INSERT INTO custom_form_responses (form_id,answers) VALUES ($1,$2::jsonb)',
+    [rows[0].id, JSON.stringify(answers)],
+  );
+  res.status(201).json({ message: 'Your response has been submitted.' });
+}));
+
+router.get('/forms', permission('forms.manage'), asyncRoute(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT f.id,f.title,f.description,f.slug,f.fields,f.is_published,f.created_at,f.updated_at,
+       COUNT(r.id)::int AS response_count
+     FROM custom_forms f LEFT JOIN custom_form_responses r ON r.form_id=f.id
+     GROUP BY f.id ORDER BY f.updated_at DESC`,
+  );
+  res.json({ data: rows });
+}));
+
+router.post('/forms', permission('forms.manage'), asyncRoute(async (req, res) => {
+  const form = parseFormInput(normalizeFormDefinition, req.body || {}, res);
+  if (!form) return;
+  const { rows: conflicts } = await pool.query('SELECT 1 FROM custom_forms WHERE slug=$1', [form.slug]);
+  if (conflicts[0]) return res.status(409).json({ error: 'That form URL is already in use.' });
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO custom_forms (title,description,slug,fields,created_by)
+       VALUES ($1,$2,$3,$4::jsonb,$5)
+       RETURNING id,title,description,slug,fields,is_published,created_at,updated_at`,
+      [form.title,form.description,form.slug,JSON.stringify(form.fields),req.session.user.id],
+    );
+    return res.status(201).json({ data: rows[0] });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: 'That form URL is already in use.' });
+    throw error;
+  }
+}));
+
+router.put('/forms/:id', permission('forms.manage'), asyncRoute(async (req, res) => {
+  const form = parseFormInput(normalizeFormDefinition, req.body || {}, res);
+  if (!form) return;
+  const { rows: conflicts } = await pool.query(
+    'SELECT 1 FROM custom_forms WHERE slug=$1 AND id<>$2',
+    [form.slug,req.params.id],
+  );
+  if (conflicts[0]) return res.status(409).json({ error: 'That form URL is already in use.' });
+  try {
+    const { rows } = await pool.query(
+      `UPDATE custom_forms SET title=$2,description=$3,slug=$4,fields=$5::jsonb,updated_at=NOW()
+       WHERE id=$1
+       RETURNING id,title,description,slug,fields,is_published,created_at,updated_at`,
+      [req.params.id,form.title,form.description,form.slug,JSON.stringify(form.fields)],
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Form not found.' });
+    return res.json({ data: rows[0] });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: 'That form URL is already in use.' });
+    throw error;
+  }
+}));
+
+router.patch('/forms/:id/publish', permission('forms.manage'), asyncRoute(async (req, res) => {
+  const isPublished = req.body?.isPublished === true;
+  const { rows } = await pool.query(
+    `UPDATE custom_forms SET is_published=$2,updated_at=NOW()
+     WHERE id=$1 AND ($2::boolean=FALSE OR jsonb_array_length(fields)>0)
+     RETURNING id,is_published`,
+    [req.params.id,isPublished],
+  );
+  if (!rows[0]) {
+    const { rowCount } = await pool.query('SELECT 1 FROM custom_forms WHERE id=$1', [req.params.id]);
+    if (!rowCount) return res.status(404).json({ error: 'Form not found.' });
+    return res.status(400).json({ error: 'Add at least one question before publishing this form.' });
+  }
+  res.json({ data: rows[0] });
+}));
+
+router.delete('/forms/:id', permission('forms.manage'), asyncRoute(async (req, res) => {
+  const { rowCount } = await pool.query('DELETE FROM custom_forms WHERE id=$1', [req.params.id]);
+  if (!rowCount) return res.status(404).json({ error: 'Form not found.' });
+  res.status(204).end();
+}));
+
+router.get('/forms/:id/responses', permission('forms.manage'), asyncRoute(async (req, res) => {
+  const { rows: forms } = await pool.query('SELECT id,title,fields FROM custom_forms WHERE id=$1', [req.params.id]);
+  if (!forms[0]) return res.status(404).json({ error: 'Form not found.' });
+  const { rows: responses } = await pool.query(
+    'SELECT id,answers,created_at FROM custom_form_responses WHERE form_id=$1 ORDER BY created_at DESC',
+    [req.params.id],
+  );
+  res.json({ data: { form: forms[0], responses } });
+}));
+
+router.get('/settings', requireAuth, asyncRoute(async (_req, res) => {
+  const { rows } = await pool.query('SELECT key,value FROM system_settings');
+  const data = Object.fromEntries(rows.map(({ key, value }) => [key, value]));
+  res.json({ data: { workspaceName: 'Annotra AI', supportEmail: '', ...data } });
+}));
+
+router.patch('/settings', permission('settings.manage'), asyncRoute(async (req, res) => {
+  const updates = {};
+  if (Object.hasOwn(req.body, 'workspaceName')) {
+    updates.workspaceName = required(req.body.workspaceName, 'Workspace name');
+    if (updates.workspaceName.length > 120) {
+      return res.status(400).json({ error: 'Workspace name must be 120 characters or fewer.' });
+    }
+  }
+  if (Object.hasOwn(req.body, 'supportEmail')) {
+    updates.supportEmail = text(req.body.supportEmail, 254).toLowerCase();
+    if (updates.supportEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(updates.supportEmail)) {
+      return res.status(400).json({ error: 'Enter a valid support email address.' });
+    }
+  }
+  if (!Object.keys(updates).length || Object.keys(req.body).some((key) => !['workspaceName', 'supportEmail'].includes(key))) {
+    return res.status(400).json({ error: 'Choose valid workspace settings to update.' });
+  }
+
+  const data = await inTransaction(async (client) => {
+    for (const [key, value] of Object.entries(updates)) {
+      await client.query(
+        `INSERT INTO system_settings (key,value,updated_by,updated_at)
+         VALUES ($1,$2::jsonb,$3,NOW())
+         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value,updated_by=EXCLUDED.updated_by,updated_at=NOW()`,
+        [key, JSON.stringify(value), req.session.user.id],
+      );
+    }
+    await client.query(
+      `INSERT INTO audit_logs (actor_employee_id,action,details)
+       VALUES ($1,'settings.updated',jsonb_build_object('keys',$2::text[]))`,
+      [req.session.user.id, Object.keys(updates)],
+    );
+    const { rows } = await client.query('SELECT key,value FROM system_settings');
+    return Object.fromEntries(rows.map(({ key, value }) => [key, value]));
+  });
+  res.json({ data });
+}));
+
+router.get('/preferences', requireAuth, asyncRoute(async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT preferences FROM employee_preferences WHERE employee_id=$1',
+    [req.session.user.id],
+  );
+  res.json({ data: { compactMode: false, hideWelcome: false, ...(rows[0]?.preferences || {}) } });
+}));
+
+router.patch('/preferences', requireAuth, asyncRoute(async (req, res) => {
+  const allowed = ['compactMode', 'hideWelcome'];
+  if (!Object.keys(req.body).length || Object.keys(req.body).some((key) => !allowed.includes(key))) {
+    return res.status(400).json({ error: 'Choose valid personal preferences to update.' });
+  }
+  for (const key of Object.keys(req.body)) {
+    if (typeof req.body[key] !== 'boolean') {
+      return res.status(400).json({ error: 'Personal preference values must be enabled or disabled.' });
+    }
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO employee_preferences (employee_id,preferences)
+     VALUES ($1,$2::jsonb)
+     ON CONFLICT (employee_id) DO UPDATE
+       SET preferences=employee_preferences.preferences || EXCLUDED.preferences,updated_at=NOW()
+     RETURNING preferences`,
+    [req.session.user.id, JSON.stringify(req.body)],
+  );
+  res.json({ data: { compactMode: false, hideWelcome: false, ...rows[0].preferences } });
+}));
+
+router.get('/dashboard', permission('dashboard.view'), asyncRoute(async (req, res) => {
+  const { user } = req.session;
+  if (user.role === 'Annotator') {
+    const [{ rows: counts }, { rows: projects }, { rows: applications }, { rows: announcements }, { rows: notifications }, { rows: profile }] = await Promise.all([
+      pool.query(
+        `SELECT
+          (SELECT COUNT(*)::int FROM projects WHERE status='Published' AND (application_deadline IS NULL OR application_deadline>=CURRENT_DATE)) AS available_projects,
+          (SELECT COUNT(*)::int FROM project_applications WHERE employee_id=$1) AS my_applications,
+          (SELECT COUNT(*)::int FROM project_applications WHERE employee_id=$1 AND status='Approved') AS approved_projects,
+          (SELECT COUNT(*)::int FROM project_applications WHERE employee_id=$1 AND status='Pending') AS pending_applications`,
+        [user.id],
+      ),
+      pool.query(
+        `SELECT p.id,p.name,p.description,p.required_skills,p.project_type,p.application_deadline,v.company_name AS vendor,
+          EXISTS(SELECT 1 FROM project_applications a WHERE a.project_id=p.id AND a.employee_id=$1) AS applied
+         FROM projects p JOIN vendors v ON v.id=p.vendor_id
+         WHERE p.status='Published' AND (p.application_deadline IS NULL OR p.application_deadline>=CURRENT_DATE)
+         ORDER BY p.application_deadline NULLS LAST LIMIT 6`,
+        [user.id],
+      ),
+      pool.query(
+        `SELECT a.id,p.name AS project,a.status,a.remarks,a.applied_at
+         FROM project_applications a JOIN projects p ON p.id=a.project_id
+         WHERE a.employee_id=$1 ORDER BY a.applied_at DESC LIMIT 5`,
+        [user.id],
+      ),
+      pool.query(
+        `SELECT id,title,body,priority,publish_at FROM announcements
+         WHERE is_published=TRUE AND publish_at<=NOW() AND (expires_at IS NULL OR expires_at>NOW())
+          AND (target_all=TRUE OR EXISTS(SELECT 1 FROM announcement_recipients ar WHERE ar.announcement_id=announcements.id AND ar.employee_id=$1))
+         ORDER BY publish_at DESC LIMIT 4`,
+        [user.id],
+      ),
+      pool.query('SELECT id,title,body,kind,read_at,created_at FROM notifications WHERE employee_id=$1 ORDER BY created_at DESC LIMIT 5', [user.id]),
+      pool.query('SELECT skills,experience_years,profile_photo_url,resume_url,id_proof_url FROM employees WHERE id=$1', [user.id]),
+    ]);
+    const data = profile[0] || {};
+    const completion = Math.round(([
+      user.name, data.skills?.length, Number(data.experience_years) > 0,
+      Boolean(data.profile_photo_url), Boolean(data.resume_url || data.id_proof_url),
+    ].filter(Boolean).length / 5) * 100);
+    return res.json({ role: 'employee', stats: counts[0], projects: projects.rows, applications: applications.rows, announcements: announcements.rows, activity: notifications.rows, profileCompletion: completion });
+  }
+
+  if (['Team Lead','Reviewer'].includes(user.role)) {
+    const [{ rows: projects }, { rows: announcements }] = await Promise.all([
+      pool.query(
+        `SELECT p.id,p.name,p.status,p.application_deadline,v.company_name AS vendor
+         FROM project_assignments pa JOIN projects p ON p.id=pa.project_id
+         JOIN vendors v ON v.id=p.vendor_id WHERE pa.employee_id=$1
+         ORDER BY p.updated_at DESC LIMIT 50`,
+        [user.id],
+      ),
+      pool.query(
+        `SELECT id,title,body,priority,publish_at FROM announcements
+         WHERE is_published=TRUE AND publish_at<=NOW() AND (expires_at IS NULL OR expires_at>NOW())
+         ORDER BY publish_at DESC LIMIT 5`,
+      ),
+    ]);
+    return res.json({
+      role: 'team',
+      stats: { assigned_projects: projects.length },
+      projects: projects.rows,
+      announcements: announcements.rows,
+    });
+  }
+
+  const [{ rows: stats }, { rows: projects }, { rows: applications }, { rows: announcements }, { rows: overview }, { rows: progress }] = await Promise.all([
+    pool.query(
+      `SELECT
+        (SELECT COUNT(*)::int FROM employees WHERE status IN ('active','inactive','pending','rejected')) AS employees,
+        (SELECT COUNT(*)::int FROM employees WHERE status='active') AS active_employees,
+        (SELECT COUNT(*)::int FROM employees WHERE status='inactive') AS inactive_employees,
+        (SELECT COUNT(*)::int FROM employees WHERE status='pending') AS pending_registrations,
+        (SELECT COUNT(*)::int FROM employees WHERE status='active' AND employee_type='Annotator') AS annotators,
+        (SELECT COUNT(*)::int FROM projects) AS projects,
+        (SELECT COUNT(*)::int FROM vendors WHERE status='active') AS vendors,
+        (SELECT COUNT(*)::int FROM project_applications) AS applications`,
+    ),
+    pool.query(
+      `SELECT p.id,p.name,v.company_name AS vendor,p.status,p.application_deadline,
+        LEAST(100,GREATEST(0,COALESCE((SELECT COUNT(*)*100/p.required_annotators FROM project_assignments pa WHERE pa.project_id=p.id),0)))::int AS progress
+       FROM projects p JOIN vendors v ON v.id=p.vendor_id ORDER BY p.created_at DESC LIMIT 5`,
+    ),
+    pool.query(
+      `SELECT a.id,e.full_name AS employee,p.name AS project,a.applied_at,a.status
+       FROM project_applications a JOIN employees e ON e.id=a.employee_id JOIN projects p ON p.id=a.project_id
+       ORDER BY a.applied_at DESC LIMIT 5`,
+    ),
+    pool.query('SELECT id,title,body,priority,publish_at FROM announcements ORDER BY publish_at DESC LIMIT 4'),
+    pool.query(`SELECT status,COUNT(*)::int AS count FROM projects GROUP BY status`),
+    pool.query(
+      `SELECT TO_CHAR(DATE_TRUNC('month',created_at),'Mon') AS month,COUNT(*)::int AS count
+       FROM projects WHERE created_at>=DATE_TRUNC('month',NOW())-INTERVAL '9 months'
+       GROUP BY DATE_TRUNC('month',created_at) ORDER BY DATE_TRUNC('month',created_at)`,
+    ),
+  ]);
+  res.json({ role: 'admin', stats: stats[0], projects: projects.rows, applications: applications.rows, announcements: announcements.rows, overview: overview.rows, progress: progress.rows });
+}));
+
+router.get('/projects', permission('projects.view'), asyncRoute(async (req, res) => {
+  const availableOnly = req.query.available === 'true';
+  const assignedOnly = req.query.assigned === 'true';
+  const searchText = text(req.query.search, 100);
+  const search = searchText ? `%${searchText}%` : null;
+  const status = text(req.query.status, 30);
+  const vendorId = text(req.query.vendorId, 50);
+  const dateFrom = text(req.query.dateFrom, 10);
+  const dateTo = text(req.query.dateTo, 10);
+  const page = Math.max(1, Math.min(1_000_000, Number.parseInt(req.query.page, 10) || 1));
+  const pageSize = Math.max(10, Math.min(100, Number.parseInt(req.query.pageSize, 10) || 25));
+  const sortColumns = { name:'p.name',status:'p.status',vendor:'v.company_name',startDate:'p.start_date',createdAt:'p.created_at' };
+  const sortColumn = sortColumns[text(req.query.sortBy, 20)] || 'p.created_at';
+  const sortDirection = req.query.sortDirection === 'asc' ? 'ASC' : 'DESC';
+  if (status && !['Draft','Published','In Progress','Completed','On Hold','Cancelled'].includes(status)) return res.status(400).json({ error: 'Select a valid project status filter.' });
+  if (vendorId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(vendorId)) return res.status(400).json({ error: 'Select a valid vendor filter.' });
+  if ((dateFrom && !validDateOnly(dateFrom)) || (dateTo && !validDateOnly(dateTo))) return res.status(400).json({ error: 'Enter valid project date filters.' });
+  if (dateFrom && dateTo && dateFrom > dateTo) return res.status(400).json({ error: 'Project date range is invalid.' });
+  const values = [availableOnly,search,req.session.user.id,assignedOnly,req.session.user.role !== 'Annotator',status || null,vendorId || null,dateFrom || null,dateTo || null];
+  const where = `WHERE (($5::boolean=TRUE AND $1::boolean=FALSE AND $4::boolean=FALSE)
+       OR ($1::boolean=TRUE AND p.status='Published' AND (p.application_deadline IS NULL OR p.application_deadline>=CURRENT_DATE))
+       OR ($4::boolean=TRUE AND EXISTS(SELECT 1 FROM project_assignments pa WHERE pa.project_id=p.id AND pa.employee_id=$3))
+       OR ($5::boolean=FALSE AND $1::boolean=FALSE AND $4::boolean=FALSE
+         AND ((p.status='Published' AND (p.application_deadline IS NULL OR p.application_deadline>=CURRENT_DATE))
+           OR EXISTS(SELECT 1 FROM project_applications a WHERE a.project_id=p.id AND a.employee_id=$3))))
+       AND ($2::text IS NULL OR p.name ILIKE $2 OR p.code ILIKE $2 OR v.company_name ILIKE $2)
+       AND ($6::text IS NULL OR p.status=$6)
+       AND ($7::uuid IS NULL OR p.vendor_id=$7)
+       AND ($8::date IS NULL OR p.start_date >= $8::date)
+       AND ($9::date IS NULL OR p.start_date <= $9::date)`;
+  const [{ rows }, { rows: countRows }] = await Promise.all([
+    pool.query(
+    `SELECT p.*,v.company_name AS vendor,
+      EXISTS(SELECT 1 FROM project_applications a WHERE a.project_id=p.id AND a.employee_id=$3) AS applied
+     FROM projects p JOIN vendors v ON v.id=p.vendor_id ${where}
+     ORDER BY ${sortColumn} ${sortDirection},p.id ASC LIMIT $10 OFFSET $11`,
+    [...values,pageSize,(page-1)*pageSize]),
+    pool.query(`SELECT COUNT(*)::int AS total FROM projects p JOIN vendors v ON v.id=p.vendor_id ${where}`,values),
+  ]);
+  const total=countRows[0].total;
+  res.json({ data: rows, pagination:{page,pageSize,total,totalPages:Math.ceil(total/pageSize)} });
+}));
+
+router.post('/projects', permission('projects.create'), asyncRoute(async (req, res) => {
+  const body = req.body;
+  const status=body.status||'Draft';
+  if(!['Draft','Published','In Progress','Completed','On Hold','Cancelled'].includes(status))return res.status(400).json({error:'Invalid project status.'});
+  if(status==='Published'&&!await hasPermission(req.session.user,'projects.publish'))return res.status(403).json({error:'You do not have permission to publish projects.'});
+  const { rows } = await pool.query(
+    `INSERT INTO projects (name,code,vendor_id,description,instructions,required_skills,required_annotators,start_date,end_date,application_deadline,project_type,estimated_budget,status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+    [required(body.name, 'Project name'),required(body.code, 'Project code'),required(body.vendorId, 'Vendor'),text(body.description),text(body.instructions),csvArray(body.requiredSkills),Math.max(1,Number(body.requiredAnnotators)||1),body.startDate||null,body.endDate||null,body.applicationDeadline||null,text(body.projectType,100)||'Annotation',body.estimatedBudget||null,status],
+  );
+  res.status(201).json({ data: rows[0] });
+}));
+
+router.patch('/projects/:id', permission('projects.edit'), asyncRoute(async (req, res) => {
+  const body = req.body;
+  if(body.status&&!['Draft','Published','In Progress','Completed','On Hold','Cancelled'].includes(body.status))return res.status(400).json({error:'Invalid project status.'});
+  if(body.status==='Published'&&!await hasPermission(req.session.user,'projects.publish'))return res.status(403).json({error:'You do not have permission to publish projects.'});
+  const requiredSkills = body.requiredSkills===undefined?null:csvArray(body.requiredSkills);
+  const requiredAnnotators = body.requiredAnnotators===undefined?null:(Number(body.requiredAnnotators)||null);
+  const { rows } = await pool.query(
+    `UPDATE projects SET name=COALESCE($2,name),code=COALESCE($3,code),vendor_id=COALESCE($4,vendor_id),
+       description=COALESCE($5,description),instructions=COALESCE($6,instructions),
+       required_skills=COALESCE($7,required_skills),required_annotators=COALESCE($8,required_annotators),
+       start_date=COALESCE($9,start_date),end_date=COALESCE($10,end_date),
+       application_deadline=COALESCE($11,application_deadline),project_type=COALESCE($12,project_type),
+       estimated_budget=COALESCE($13,estimated_budget),status=COALESCE($14,status),updated_at=NOW()
+     WHERE id=$1 RETURNING *`,
+    [req.params.id,body.name||null,body.code||null,body.vendorId||null,body.description??null,body.instructions??null,requiredSkills,requiredAnnotators,body.startDate||null,body.endDate||null,body.applicationDeadline||null,body.projectType||null,body.estimatedBudget||null,body.status||null],
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Project not found.' });
+  res.json({ data: rows[0] });
+}));
+
+router.post('/projects/:id/apply', requireAuth, asyncRoute(async (req, res) => {
+  if (req.session.user.role !== 'Annotator') return res.status(403).json({ error: 'Only annotators can apply to projects.' });
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO project_applications (project_id,employee_id) SELECT p.id,$2 FROM projects p
+       WHERE p.id=$1 AND p.status='Published' AND (p.application_deadline IS NULL OR p.application_deadline>=CURRENT_DATE)
+       RETURNING id,status,applied_at`,
+      [req.params.id,req.session.user.id],
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'This project is not currently accepting applications.' });
+    res.status(201).json({ data: rows[0] });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: 'You have already applied for this project.' });
+    throw error;
+  }
+}));
+
+router.get('/employees', permission('employees.view'), asyncRoute(async (req, res) => {
+  const search = text(req.query.search, 120);
+  const roleId = text(req.query.roleId, 50);
+  const employeeType = text(req.query.employeeType, 80);
+  const status = text(req.query.status, 20);
+  const joiningFrom = text(req.query.joiningFrom, 10);
+  const joiningTo = text(req.query.joiningTo, 10);
+  const page = Math.max(1, Math.min(1_000_000, Number.parseInt(req.query.page, 10) || 1));
+  const pageSize = Math.max(10, Math.min(100, Number.parseInt(req.query.pageSize, 10) || 25));
+  const sortColumns = {
+    name: 'e.full_name',
+    email: 'e.email',
+    mobile: 'e.mobile',
+    role: 'r.name',
+    status: 'e.status',
+    joiningDate: 'e.created_at',
+  };
+  const sortColumn = sortColumns[text(req.query.sortBy, 20)] || 'e.created_at';
+  const sortDirection = req.query.sortDirection === 'asc' ? 'ASC' : 'DESC';
+  if (roleId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(roleId)) return res.status(400).json({ error: 'Select a valid role filter.' });
+  if (status && !['pending','active','inactive','rejected'].includes(status)) return res.status(400).json({ error: 'Select a valid account status filter.' });
+  if ((joiningFrom && !validDateOnly(joiningFrom)) || (joiningTo && !validDateOnly(joiningTo))) {
+    return res.status(400).json({ error: 'Enter valid joining date filters.' });
+  }
+  if (joiningFrom && joiningTo && joiningFrom > joiningTo) return res.status(400).json({ error: 'Joining date range is invalid.' });
+
+  const values = [search ? `%${search}%` : null, roleId || null, employeeType || null, status || null, joiningFrom || null, joiningTo || null];
+  const where = `WHERE ($1::text IS NULL OR e.full_name ILIKE $1 OR e.email ILIKE $1 OR e.mobile ILIKE $1 OR e.id::text ILIKE $1)
+       AND ($2::uuid IS NULL OR e.role_id=$2)
+       AND ($3::text IS NULL OR e.employee_type=$3)
+       AND ($4::text IS NULL OR e.status=$4)
+       AND ($5::date IS NULL OR e.created_at::date >= $5::date)
+       AND ($6::date IS NULL OR e.created_at::date <= $6::date)`;
+  const [{ rows }, { rows: countRows }] = await Promise.all([
+    pool.query(
+      `SELECT e.id,e.full_name,e.email,e.mobile,e.skills,e.experience_years,e.highest_qualification,e.city,e.linkedin_url,e.role_id,
+         e.profile_photo_url,e.resume_url,e.employee_type,e.status,e.created_at,r.name AS role
+       FROM employees e JOIN roles r ON r.id=e.role_id ${where}
+       ORDER BY ${sortColumn} ${sortDirection},e.id ASC
+       LIMIT $7 OFFSET $8`,
+      [...values, pageSize, (page - 1) * pageSize],
+    ),
+    pool.query(`SELECT COUNT(*)::int AS total FROM employees e JOIN roles r ON r.id=e.role_id ${where}`, values),
+  ]);
+  const total = countRows[0].total;
+  res.json({ data: rows, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } });
+}));
+
+router.post('/employees', permission('employees.create'), asyncRoute(async (req, res) => {
+  const body = req.body;
+  const mobile = cleanMobile(body.mobile);
+  if (!mobile) return res.status(400).json({ error: 'Enter a valid Indian mobile number.' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(body.email || ''))) return res.status(400).json({ error: 'Enter a valid email address.' });
+  const { rows: targetRoles } = await pool.query(
+    `SELECT r.name,COALESCE(array_agg(p.code) FILTER(WHERE p.code IS NOT NULL),'{}') AS permissions
+     FROM roles r LEFT JOIN role_permissions rp ON rp.role_id=r.id LEFT JOIN permissions p ON p.id=rp.permission_id
+     WHERE r.id=$1 GROUP BY r.id`,
+    [required(body.roleId,'Role')],
+  );
+  if (!targetRoles[0]) return res.status(400).json({ error: 'Select a valid role.' });
+  if (targetRoles[0].name === 'Super Admin') {
+    return res.status(403).json({ error: 'Super Admin accounts can only be initialized through the trusted backend command.' });
+  }
+  if (!canGrantPermissions(req.session.user, targetRoles[0].permissions)) {
+    return res.status(403).json({ error: 'You cannot assign a role with permissions you do not have.' });
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO employees (full_name,email,mobile,date_of_birth,gender,address,skills,experience_years,employee_type,role_id,status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     RETURNING id,full_name,email,mobile,skills,experience_years,employee_type,status`,
+    [required(body.fullName,'Full name'),required(body.email,'Email'),mobile,body.dateOfBirth||null,text(body.gender,40)||null,text(body.address),csvArray(body.skills),Number(body.experienceYears)||0,text(body.employeeType,50)||'Annotator',required(body.roleId,'Role'),body.status==='inactive'?'inactive':'active'],
+  );
+  res.status(201).json({ data: rows[0] });
+}));
+
+router.patch('/employees/:id/status', permission('employees.edit'), asyncRoute(async (req, res) => {
+  const status = req.body.status;
+  if (!['active','inactive'].includes(status)) return res.status(400).json({ error: 'Status must be active or inactive.' });
+  if (req.params.id === req.session.user.id) return res.status(403).json({ error: 'You cannot change your own account status.' });
+  const updated = await inTransaction(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE employees e SET status=$2,updated_at=NOW()
+       FROM roles r WHERE e.id=$1 AND e.role_id=r.id AND r.name<>'Super Admin'
+         AND e.status IN ('active','inactive') RETURNING e.id`,
+      [req.params.id, status],
+    );
+    if (!rows[0]) return false;
+    await client.query(
+      `INSERT INTO audit_logs (actor_employee_id,action,target_employee_id,details)
+       VALUES ($1,$2,$3,jsonb_build_object('status',$4::text))`,
+      [req.session.user.id, `employee.${status === 'active' ? 'reactivated' : 'deactivated'}`, req.params.id, status],
+    );
+    return true;
+  });
+  if (!updated) return res.status(404).json({ error: 'Employee not found or must be reviewed through the registration approval workflow.' });
+  res.json({ message: `Employee ${status}.` });
+}));
+
+router.patch('/employees/:id/approval', permission('employees.approve'), asyncRoute(async (req, res) => {
+  const status = req.body.status;
+  if (!['active', 'rejected'].includes(status)) {
+    return res.status(400).json({ error: 'Registration status must be active or rejected.' });
+  }
+  if (req.params.id === req.session.user.id) return res.status(403).json({ error: 'You cannot review your own registration.' });
+  const reviewed = await inTransaction(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE employees SET status=$2,updated_at=NOW()
+       WHERE id=$1 AND status='pending' AND role_id=(SELECT id FROM roles WHERE name='Annotator')
+       RETURNING id`,
+      [req.params.id, status],
+    );
+    if (!rows[0]) return false;
+    await client.query(
+      `INSERT INTO audit_logs (actor_employee_id,action,target_employee_id,details)
+       VALUES ($1,$2,$3,jsonb_build_object('status',$4::text))`,
+      [req.session.user.id, status === 'active' ? 'employee.registration_approved' : 'employee.registration_rejected', req.params.id, status],
+    );
+    return true;
+  });
+  if (!reviewed) return res.status(404).json({ error: 'Pending Annotator registration not found.' });
+  res.json({ message: `Employee registration ${status === 'active' ? 'approved' : 'rejected'}.` });
+}));
+
+router.patch('/employees/:id/role', permission('employees.assign_role'), asyncRoute(async (req, res) => {
+  if (req.params.id === req.session.user.id) return res.status(403).json({ error: 'You cannot change your own role.' });
+  const roleId = required(req.body.roleId, 'Role');
+  const changed = await inTransaction(async (client) => {
+    const { rows: targetRoles } = await client.query(
+      `SELECT r.id,r.name,COALESCE(array_agg(p.code) FILTER(WHERE p.code IS NOT NULL),'{}') AS permissions
+       FROM roles r
+       LEFT JOIN role_permissions rp ON rp.role_id=r.id
+       LEFT JOIN permissions p ON p.id=rp.permission_id
+       WHERE r.id=$1 GROUP BY r.id`,
+      [roleId],
+    );
+    if (!targetRoles[0]) return { error: 'Select a valid role.' };
+    if (targetRoles[0].name === 'Super Admin') {
+      return { error: 'Super Admin accounts can only be initialized through the trusted backend command.' };
+    }
+    if (!canGrantPermissions(req.session.user, targetRoles[0].permissions)) {
+      return { error: 'You cannot assign a role with permissions you do not have.' };
+    }
+    const { rows } = await client.query(
+      `UPDATE employees e SET role_id=$2,updated_at=NOW()
+       FROM roles current_role
+       WHERE e.id=$1 AND e.role_id=current_role.id AND current_role.name<>'Super Admin'
+         AND e.status IN ('active','inactive')
+       RETURNING e.id`,
+      [req.params.id, roleId],
+    );
+    if (!rows[0]) return { error: 'Employee not found or is protected as a Super Admin.' };
+    await client.query(
+      `INSERT INTO audit_logs (actor_employee_id,action,target_employee_id,details)
+       VALUES ($1,'employee.role_changed',$2,jsonb_build_object('role',$3::text))`,
+      [req.session.user.id, req.params.id, targetRoles[0].name],
+    );
+    return { ok: true };
+  });
+  if (changed.error) return res.status(400).json({ error: changed.error });
+  res.json({ message: 'Employee role updated.' });
+}));
+
+router.get('/audit-logs', permission('audit.view'), asyncRoute(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT a.id,a.action,a.details,a.created_at,
+       actor.full_name AS actor,target.full_name AS target
+     FROM audit_logs a
+     LEFT JOIN employees actor ON actor.id=a.actor_employee_id
+     LEFT JOIN employees target ON target.id=a.target_employee_id
+     ORDER BY a.created_at DESC LIMIT 200`,
+  );
+  res.json({ data: rows });
+}));
+
+router.get('/employees/:id', requireAuth, asyncRoute(async (req,res)=>{
+  const owner=req.params.id===req.session.user.id;
+  if(!owner&&!await hasPermission(req.session.user,'employees.view'))return res.status(403).json({error:'You do not have permission to view this employee.'});
+  const {rows}=await pool.query(`SELECT e.id,e.full_name,e.email,e.mobile,e.date_of_birth,e.gender,e.address,e.skills,
+    e.experience_years,e.highest_qualification,e.city,e.linkedin_url,e.employee_type,e.profile_photo_url,e.resume_url,e.id_proof_url,e.status,r.name AS role,
+    COALESCE(json_agg(json_build_object('id',d.id,'document_type',d.document_type,'file_name',d.file_name,'file_url',d.file_url))
+      FILTER(WHERE d.id IS NOT NULL),'[]') AS documents
+    FROM employees e JOIN roles r ON r.id=e.role_id LEFT JOIN employee_documents d ON d.employee_id=e.id
+    WHERE e.id=$1 GROUP BY e.id,r.name`,[req.params.id]);
+  if(!rows[0])return res.status(404).json({error:'Employee not found.'});
+  res.json({data:rows[0]});
+}));
+
+router.get('/private-files/:fileName', requireAuth, asyncRoute(async (req,res)=>{
+  const { rows } = await pool.query(
+    `SELECT d.employee_id,d.file_name,d.mime_type,d.document_type,e.full_name
+     FROM employee_documents d JOIN employees e ON e.id=d.employee_id
+     WHERE d.file_url=$1 AND d.document_type IN ('resume','profile-photo')`,
+    [`/api/private-files/${req.params.fileName}`],
+  );
+  const document = rows[0];
+  if (!document) return res.status(404).json({error:'Private employee file not found.'});
+  const owner = document.employee_id === req.session.user.id;
+  if (!owner && !await hasPermission(req.session.user,'employees.view')) {
+    return res.status(403).json({error:'You do not have permission to view this resume.'});
+  }
+  const file = await readPrivateFile(req.params.fileName);
+  if (!file) return res.status(404).json({error:'Resume file is no longer available.'});
+  const safeName = document.file_name.split(/[\\/]/).pop().replace(/[\r\n"]/g,'_');
+  res.set({
+    'Content-Type': document.mime_type,
+    'Content-Length': file.size,
+    'Content-Disposition': `${document.mime_type.startsWith('image/')?'inline':'attachment'}; filename="${safeName}"`,
+    'Cache-Control': 'private, no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.send(file.buffer);
+}));
+
+router.patch('/employees/:id', requireAuth, asyncRoute(async (req,res)=>{
+  const owner=req.params.id===req.session.user.id;
+  if(!owner&&!await hasPermission(req.session.user,'employees.edit'))return res.status(403).json({error:'You do not have permission to edit this employee.'});
+  const b=req.body;
+  if(b.email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.email)))return res.status(400).json({error:'Enter a valid email address.'});
+  if(b.mobile) {
+    const mobile = cleanMobile(b.mobile);
+    if(!mobile) return res.status(400).json({error:'Enter a valid Indian mobile number.'});
+    b.mobile = mobile;
+  }
+  if(b.status && !['active','inactive','pending','rejected'].includes(b.status)) return res.status(400).json({error:'Select a valid account status.'});
+  if(b.roleId && (owner||req.params.id===req.session.user.id)) return res.status(403).json({error:'You cannot change your own role.'});
+  if(b.roleId && !await hasPermission(req.session.user,'employees.assign_role')) return res.status(403).json({error:'You do not have permission to assign roles.'});
+  const skills=b.skills===undefined?null:csvArray(b.skills);
+  const updated = await inTransaction(async (client) => {
+    if(b.roleId && !owner && req.params.id!==req.session.user.id && await hasPermission(req.session.user,'employees.assign_role')) {
+      const { rows: targetRoles } = await client.query(
+        `SELECT r.id,r.name,COALESCE(array_agg(p.code) FILTER(WHERE p.code IS NOT NULL),'{}') AS permissions
+         FROM roles r LEFT JOIN role_permissions rp ON rp.role_id=r.id LEFT JOIN permissions p ON p.id=rp.permission_id
+         WHERE r.id=$1 GROUP BY r.id`,
+        [b.roleId],
+      );
+      if(!targetRoles[0]) throw Object.assign(new Error('Select a valid role.'),{status:400});
+      if(targetRoles[0].name==='Super Admin') throw Object.assign(new Error('Super Admin accounts can only be initialized through the trusted backend command.'),{status:403});
+      if(!canGrantPermissions(req.session.user,targetRoles[0].permissions)) throw Object.assign(new Error('You cannot assign a role with permissions you do not have.'),{status:403});
+      const { rows: current } = await client.query('SELECT e.role_id,r.name FROM employees e JOIN roles r ON r.id=e.role_id WHERE e.id=$1',[req.params.id]);
+      if(!current[0]) throw Object.assign(new Error('Employee not found.'),{status:404});
+      if(current[0].name==='Super Admin') throw Object.assign(new Error('Employee is protected as a Super Admin.'),{status:403});
+      await client.query('UPDATE employees SET role_id=$2,updated_at=NOW() WHERE id=$1',[req.params.id,b.roleId]);
+    }
+    const {rows}=await client.query(`UPDATE employees SET full_name=COALESCE($2,full_name),email=COALESCE($3,email),
+      mobile=COALESCE($4,mobile),date_of_birth=COALESCE($5,date_of_birth),gender=COALESCE($6,gender),address=COALESCE($7,address),
+      skills=COALESCE($8,skills),experience_years=COALESCE($9,experience_years),highest_qualification=COALESCE($10,highest_qualification),
+      city=COALESCE($11,city),linkedin_url=COALESCE($12,linkedin_url),employee_type=COALESCE($13,employee_type),status=COALESCE($14,status),
+      updated_at=NOW()
+      WHERE id=$1 RETURNING id,full_name,email,mobile,date_of_birth,gender,address,skills,experience_years,highest_qualification,city,linkedin_url,employee_type,status,role_id`,
+      [req.params.id,b.fullName||null,b.email||null,b.mobile||null,b.dateOfBirth||null,b.gender||null,b.address??null,skills,b.experienceYears===undefined?null:Number(b.experienceYears),b.highestQualification??null,b.city??null,b.linkedinUrl??null,b.employeeType||null,b.status||null]);
+    if(!rows[0]) throw Object.assign(new Error('Employee not found.'),{status:404});
+    return rows[0];
+  });
+  res.json({data:updated});
+}));
+
+router.get('/vendors', permission('vendors.view'), asyncRoute(async (req, res) => {
+  const searchText=text(req.query.search,100);
+  const search=searchText?`%${searchText}%`:null;
+  const status=text(req.query.status,20);
+  const dateFrom=text(req.query.dateFrom,10);
+  const dateTo=text(req.query.dateTo,10);
+  const page=Math.max(1,Math.min(1_000_000,Number.parseInt(req.query.page,10)||1));
+  const pageSize=Math.max(10,Math.min(100,Number.parseInt(req.query.pageSize,10)||25));
+  const sortColumns={name:'company_name',status:'status',createdAt:'created_at'};
+  const sortColumn=sortColumns[text(req.query.sortBy,20)]||'company_name';
+  const sortDirection=req.query.sortDirection==='desc'?'DESC':'ASC';
+  if(status&&!['active','inactive'].includes(status))return res.status(400).json({error:'Select a valid vendor status filter.'});
+  if((dateFrom&&!validDateOnly(dateFrom))||(dateTo&&!validDateOnly(dateTo)))return res.status(400).json({error:'Enter valid vendor date filters.'});
+  if(dateFrom&&dateTo&&dateFrom>dateTo)return res.status(400).json({error:'Vendor date range is invalid.'});
+  const values=[search,status||null,dateFrom||null,dateTo||null];
+  const where=`WHERE ($1::text IS NULL OR company_name ILIKE $1 OR contact_person ILIKE $1 OR email ILIKE $1 OR mobile ILIKE $1)
+    AND ($2::text IS NULL OR status=$2)
+    AND ($3::date IS NULL OR created_at::date >= $3::date)
+    AND ($4::date IS NULL OR created_at::date <= $4::date)`;
+  const [{rows},{rows:countRows}]=await Promise.all([
+    pool.query(`SELECT * FROM vendors ${where} ORDER BY ${sortColumn} ${sortDirection},id ASC LIMIT $5 OFFSET $6`,[...values,pageSize,(page-1)*pageSize]),
+    pool.query(`SELECT COUNT(*)::int AS total FROM vendors ${where}`,values),
+  ]);
+  const total=countRows[0].total;
+  res.json({data:rows,pagination:{page,pageSize,total,totalPages:Math.ceil(total/pageSize)}});
+}));
+
+router.post('/vendors', permission('vendors.create'), asyncRoute(async (req, res) => {
+  const b = req.body;
+  const { rows } = await pool.query(
+    `INSERT INTO vendors (company_name,contact_person,email,mobile,address,company_details)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+    [required(b.companyName,'Company name'),required(b.contactPerson,'Contact person'),required(b.email,'Email'),required(b.mobile,'Mobile number'),text(b.address),text(b.companyDetails)],
+  );
+  res.status(201).json({ data: rows[0] });
+}));
+
+router.patch('/vendors/:id', permission('vendors.edit'), asyncRoute(async (req,res)=>{
+  const b=req.body;
+  if(b.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.email)))return res.status(400).json({error:'Enter a valid email address.'});
+  if(b.mobile) {
+    const mobile = cleanMobile(b.mobile);
+    if(!mobile) return res.status(400).json({error:'Enter a valid Indian mobile number.'});
+    b.mobile = mobile;
+  }
+  if(b.status && !['active','inactive'].includes(b.status)) return res.status(400).json({error:'Select a valid vendor status.'});
+  const {rows}=await pool.query(`UPDATE vendors SET company_name=COALESCE($2,company_name),contact_person=COALESCE($3,contact_person),
+    email=COALESCE($4,email),mobile=COALESCE($5,mobile),address=COALESCE($6,address),company_details=COALESCE($7,company_details),
+    status=COALESCE($8,status),updated_at=NOW() WHERE id=$1 RETURNING *`,
+    [req.params.id,b.companyName||null,b.contactPerson||null,b.email||null,b.mobile||null,b.address??null,b.companyDetails??null,b.status||null]);
+  if(!rows[0])return res.status(404).json({error:'Vendor not found.'});
+  res.json({data:rows[0]});
+}));
+
+router.get('/applications', permission('applications.view'), asyncRoute(async (req, res) => {
+  const searchText=text(req.query.search,100);
+  const search=searchText?`%${searchText}%`:null;
+  const status=text(req.query.status,20);
+  const dateFrom=text(req.query.dateFrom,10);
+  const dateTo=text(req.query.dateTo,10);
+  const page=Math.max(1,Math.min(1_000_000,Number.parseInt(req.query.page,10)||1));
+  const pageSize=Math.max(10,Math.min(100,Number.parseInt(req.query.pageSize,10)||25));
+  const sortColumns={appliedAt:'a.applied_at',status:'a.status',employee:'e.full_name',project:'p.name'};
+  const sortColumn=sortColumns[text(req.query.sortBy,20)]||'a.applied_at';
+  const sortDirection=req.query.sortDirection==='asc'?'ASC':'DESC';
+  if(status&&!['Pending','Approved','Rejected','Withdrawn'].includes(status))return res.status(400).json({error:'Select a valid application status filter.'});
+  if((dateFrom&&!validDateOnly(dateFrom))||(dateTo&&!validDateOnly(dateTo)))return res.status(400).json({error:'Enter valid application date filters.'});
+  if(dateFrom&&dateTo&&dateFrom>dateTo)return res.status(400).json({error:'Application date range is invalid.'});
+  const values=[search,status||null,dateFrom||null,dateTo||null];
+  const from=`FROM project_applications a JOIN employees e ON e.id=a.employee_id JOIN projects p ON p.id=a.project_id`;
+  const where=`WHERE ($1::text IS NULL OR e.full_name ILIKE $1 OR e.email ILIKE $1 OR p.name ILIKE $1)
+    AND ($2::text IS NULL OR a.status=$2)
+    AND ($3::date IS NULL OR a.applied_at::date >= $3::date)
+    AND ($4::date IS NULL OR a.applied_at::date <= $4::date)`;
+  const [{rows},{rows:countRows}]=await Promise.all([
+    pool.query(`SELECT a.id,a.status,a.remarks,a.applied_at,e.full_name AS employee,e.email,p.name AS project ${from} ${where}
+      ORDER BY ${sortColumn} ${sortDirection},a.id ASC LIMIT $5 OFFSET $6`,[...values,pageSize,(page-1)*pageSize]),
+    pool.query(`SELECT COUNT(*)::int AS total ${from} ${where}`,values),
+  ]);
+  const total=countRows[0].total;
+  res.json({data:rows,pagination:{page,pageSize,total,totalPages:Math.ceil(total/pageSize)}});
+}));
+
+router.get('/my-applications', requireAuth, asyncRoute(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT a.id,a.project_id,a.status,a.remarks,a.applied_at,
+       p.name AS project,v.company_name AS vendor,p.required_skills
+     FROM project_applications a
+     JOIN projects p ON p.id=a.project_id
+     JOIN vendors v ON v.id=p.vendor_id
+     WHERE a.employee_id=$1
+     ORDER BY a.applied_at DESC
+     LIMIT 100`,
+    [req.session.user.id],
+  );
+  res.json({ data: rows });
+}));
+
+router.patch('/applications/:id', asyncRoute(async (req, res) => {
+  const nextStatus = req.body.status;
+  if (!['Approved','Rejected'].includes(nextStatus)) return res.status(400).json({ error: 'Status must be Approved or Rejected.' });
+  const right = nextStatus === 'Approved' ? 'applications.approve' : 'applications.reject';
+  if (!await hasPermission(req.session.user,right))return res.status(req.session.user?403:401).json({error:req.session.user?'You do not have permission to perform this action.':'Authentication required.'});
+  const result = await inTransaction(async (client) => {
+    const { rows } = await client.query(
+      `SELECT a.id,a.project_id,a.employee_id,a.status,p.name AS project,e.full_name
+       FROM project_applications a JOIN projects p ON p.id=a.project_id JOIN employees e ON e.id=a.employee_id
+       WHERE a.id=$1 FOR UPDATE OF a`,
+      [req.params.id],
+    );
+    const application = rows[0];
+    if (!application) return null;
+    if(application.status!=='Pending')throw Object.assign(new Error('Only pending applications can be reviewed.'),{status:409});
+    await client.query('UPDATE project_applications SET status=$2,remarks=$3,updated_at=NOW() WHERE id=$1',[application.id,nextStatus,text(req.body.remarks,1000)||null]);
+    if (nextStatus === 'Approved') {
+      await client.query('INSERT INTO project_assignments (project_id,employee_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',[application.project_id,application.employee_id]);
+    } else {
+      await client.query('DELETE FROM project_assignments WHERE project_id=$1 AND employee_id=$2',[application.project_id,application.employee_id]);
+    }
+    await client.query(
+      'INSERT INTO notifications (employee_id,title,body,kind) VALUES ($1,$2,$3,$4)',
+      [application.employee_id,`Application ${nextStatus.toLowerCase()}`,`Your application for ${application.project} was ${nextStatus.toLowerCase()}.`,'application'],
+    );
+    return application;
+  });
+  if (!result) return res.status(404).json({ error: 'Application not found.' });
+  res.json({ message: `Application ${nextStatus.toLowerCase()}.` });
+}));
+
+router.get('/announcements', permission('announcements.view'), asyncRoute(async (req, res) => {
+  const admin = req.session.user.role !== 'Annotator';
+  const { rows } = await pool.query(
+    `SELECT a.id,a.title,a.body,a.priority,a.publish_at,a.expires_at,a.is_published
+     FROM announcements a
+     WHERE $1::boolean OR (a.is_published=TRUE AND a.publish_at<=NOW() AND (a.expires_at IS NULL OR a.expires_at>NOW())
+       AND (a.target_all=TRUE OR EXISTS(SELECT 1 FROM announcement_recipients ar WHERE ar.announcement_id=a.id AND ar.employee_id=$2)))
+     ORDER BY a.publish_at DESC LIMIT 100`,
+    [admin,req.session.user.id],
+  );
+  res.json({ data: rows });
+}));
+
+router.get('/notifications', requireAuth, asyncRoute(async(req,res)=>{
+  const {rows}=await pool.query('SELECT id,title,body,kind,read_at,created_at FROM notifications WHERE employee_id=$1 ORDER BY created_at DESC LIMIT 100',[req.session.user.id]);
+  res.json({data:rows});
+}));
+
+router.patch('/notifications/:id/read', requireAuth, asyncRoute(async(req,res)=>{
+  const {rowCount}=await pool.query('UPDATE notifications SET read_at=COALESCE(read_at,NOW()) WHERE id=$1 AND employee_id=$2',[req.params.id,req.session.user.id]);
+  if(!rowCount)return res.status(404).json({error:'Notification not found.'});
+  res.json({message:'Notification marked as read.'});
+}));
+
+router.post('/announcements', permission('announcements.create'), asyncRoute(async (req, res) => {
+  const b=req.body;
+  if(b.isPublished===true&&!await hasPermission(req.session.user,'announcements.publish'))return res.status(403).json({error:'You do not have permission to publish announcements.'});
+  if(b.targetAll===false&&(!Array.isArray(b.employeeIds)||!b.employeeIds.length))return res.status(400).json({error:'Select at least one employee for a targeted announcement.'});
+  const result=await inTransaction(async(client)=>{
+    const { rows }=await client.query(
+      `INSERT INTO announcements (title,body,priority,publish_at,expires_at,is_published,target_all,created_by)
+       VALUES ($1,$2,$3,COALESCE($4,NOW()),$5,$6,$7,$8) RETURNING *`,
+      [required(b.title,'Title'),required(b.body,'Message'),b.priority||'Normal',b.publishAt||null,b.expiresAt||null,b.isPublished===true,b.targetAll!==false,req.session.user.id],
+    );
+    if(b.targetAll===false&&Array.isArray(b.employeeIds)&&b.employeeIds.length){
+      await client.query('INSERT INTO announcement_recipients (announcement_id,employee_id) SELECT $1,id FROM employees WHERE id=ANY($2::uuid[]) ON CONFLICT DO NOTHING',[rows[0].id,b.employeeIds]);
+    }
+    return rows[0];
+  });
+  res.status(201).json({ data: result });
+}));
+
+router.patch('/announcements/:id', permission('announcements.create'), asyncRoute(async (req,res)=>{
+  const b=req.body;
+  if(b.publishAt && !validDateOnly(b.publishAt)) return res.status(400).json({error:'Enter a valid publish date.'});
+  if(b.expiresAt && !validDateOnly(b.expiresAt)) return res.status(400).json({error:'Enter a valid expiry date.'});
+  if(b.expiresAt && b.publishAt && b.expiresAt < b.publishAt) return res.status(400).json({error:'Expiry date cannot be before publish date.'});
+  const {rows}=await pool.query(`UPDATE announcements SET title=COALESCE($2,title),body=COALESCE($3,body),
+    priority=COALESCE($4,priority),publish_at=COALESCE($5,publish_at),expires_at=$6,is_published=COALESCE($7,is_published),updated_at=NOW()
+    WHERE id=$1 RETURNING *`,
+    [req.params.id,b.title||null,b.body||null,b.priority||null,b.publishAt||null,b.expiresAt??null,b.isPublished===undefined?null:(b.isPublished===true)]);
+  if(!rows[0])return res.status(404).json({error:'Announcement not found.'});
+  res.json({data:rows[0]});
+}));
+
+router.delete('/announcements/:id', permission('announcements.create'), asyncRoute(async (req,res)=>{
+  const {rowCount}=await pool.query('DELETE FROM announcements WHERE id=$1',[req.params.id]);
+  if(!rowCount)return res.status(404).json({error:'Announcement not found.'});
+  res.status(204).end();
+}));
+
+router.patch('/announcements/:id/publish', permission('announcements.publish'), asyncRoute(async (req,res)=>{
+  const isPublished = req.body.isPublished===true;
+  const { rows }=await pool.query(`UPDATE announcements SET is_published=$2,publish_at=CASE WHEN $2::boolean=TRUE AND publish_at IS NULL THEN NOW() ELSE publish_at END,updated_at=NOW() WHERE id=$1 RETURNING *`,[req.params.id,isPublished]);
+  if(!rows[0])return res.status(404).json({error:'Announcement not found.'});
+  res.json({data:rows[0]});
+}));
+
+router.get('/roles', permission('roles.manage'), asyncRoute(async (_req,res)=>{
+  const {rows}=await pool.query(`SELECT r.id,r.name,r.description,COALESCE(array_agg(p.code) FILTER(WHERE p.code IS NOT NULL),'{}') AS permissions
+    FROM roles r LEFT JOIN role_permissions rp ON rp.role_id=r.id LEFT JOIN permissions p ON p.id=rp.permission_id
+    GROUP BY r.id ORDER BY r.name`);
+  res.json({data:rows});
+}));
+
+router.post('/roles', permission('roles.manage'), asyncRoute(async (req,res)=>{
+  const name=required(req.body.name,'Role name');
+  const description=text(req.body.description,500);
+  const codes=csvArray(req.body.permissions);
+  const {rows:available}=await pool.query('SELECT COUNT(*)::int AS count FROM permissions WHERE code=ANY($1::text[])',[codes]);
+  if(available[0].count!==codes.length)return res.status(400).json({error:'One or more selected permissions are invalid.'});
+  if(!canGrantPermissions(req.session.user,codes))return res.status(403).json({error:'You cannot grant permissions you do not have.'});
+  const result=await inTransaction(async(client)=>{
+    const {rows}=await client.query('INSERT INTO roles (name,description) VALUES ($1,$2) RETURNING id,name,description',[name,description]);
+    if(codes.length)await client.query(`INSERT INTO role_permissions (role_id,permission_id)
+      SELECT $1,id FROM permissions WHERE code=ANY($2::text[]) ON CONFLICT DO NOTHING`,[rows[0].id,codes]);
+    return rows[0];
+  });
+  res.status(201).json({data:result});
+}));
+
+router.put('/roles/:id', permission('roles.manage'), asyncRoute(async (req,res)=>{
+  const codes=csvArray(req.body.permissions);
+  const {rows:available}=await pool.query('SELECT COUNT(*)::int AS count FROM permissions WHERE code=ANY($1::text[])',[codes]);
+  if(available[0].count!==codes.length)return res.status(400).json({error:'One or more selected permissions are invalid.'});
+  if(!canGrantPermissions(req.session.user,codes))return res.status(403).json({error:'You cannot grant permissions you do not have.'});
+  const {rows:existingRole}=await pool.query('SELECT name FROM roles WHERE id=$1',[req.params.id]);
+  if(existingRole[0]?.name==='Super Admin')return res.status(403).json({error:'The Super Admin role is protected.'});
+  const result=await inTransaction(async(client)=>{
+    const {rows}=await client.query('UPDATE roles SET name=COALESCE($2,name),description=COALESCE($3,description) WHERE id=$1 RETURNING id,name,description',[req.params.id,req.body.name||null,req.body.description??null]);
+    if(!rows[0])return null;
+    await client.query('DELETE FROM role_permissions WHERE role_id=$1',[req.params.id]);
+    if(codes.length)await client.query(`INSERT INTO role_permissions (role_id,permission_id)
+      SELECT $1,id FROM permissions WHERE code=ANY($2::text[]) ON CONFLICT DO NOTHING`,[req.params.id,codes]);
+    return rows[0];
+  });
+  if(!result)return res.status(404).json({error:'Role not found.'});
+  res.json({data:result});
+}));
+
+router.delete('/roles/:id', permission('roles.manage'), asyncRoute(async (req,res)=>{
+  const {rows}=await pool.query('SELECT is_system,(SELECT COUNT(*) FROM employees WHERE role_id=roles.id)::int AS assigned FROM roles WHERE id=$1',[req.params.id]);
+  if(!rows[0])return res.status(404).json({error:'Role not found.'});
+  if(rows[0].is_system||rows[0].assigned>0)return res.status(409).json({error:'This role is protected or still assigned to employees.'});
+  await pool.query('DELETE FROM roles WHERE id=$1',[req.params.id]);
+  res.status(204).end();
+}));
+
+router.get('/invitations', permission('invitations.send'), asyncRoute(async (_req,res)=>{
+  const {rows}=await pool.query(`SELECT i.id,i.subject,i.status,i.created_at,e.full_name AS employee,e.email,p.name AS project
+    FROM project_invitations i JOIN employees e ON e.id=i.employee_id JOIN projects p ON p.id=i.project_id
+    ORDER BY i.created_at DESC LIMIT 200`);
+  res.json({data:rows});
+}));
+
+router.get('/lookups', requireAuth, asyncRoute(async (req,res)=>{
+  const [canCreateProjects,canViewVendors,canViewEmployees,canCreateEmployees,canAssignRoles,canManageRoles,canInvite,canTargetAnnouncements]=await Promise.all([
+    hasPermission(req.session.user,'projects.create'),
+    hasPermission(req.session.user,'vendors.view'),
+    hasPermission(req.session.user,'employees.view'),
+    hasPermission(req.session.user,'employees.create'),
+    hasPermission(req.session.user,'employees.assign_role'),
+    hasPermission(req.session.user,'roles.manage'),
+    hasPermission(req.session.user,'invitations.send'),
+    hasPermission(req.session.user,'announcements.create'),
+  ]);
+  const [{rows:vendors},{rows:roles},{rows:permissions},{rows:employeeTypes}]=await Promise.all([
+    canCreateProjects||canViewVendors
+      ?pool.query("SELECT id,company_name FROM vendors WHERE status='active' ORDER BY company_name"):Promise.resolve({rows:[]}),
+    canCreateEmployees||canAssignRoles||canViewEmployees
+      ?pool.query('SELECT id,name FROM roles ORDER BY name'):Promise.resolve({rows:[]}),
+    canManageRoles
+      ?pool.query('SELECT code,description FROM permissions ORDER BY code'):Promise.resolve({rows:[]}),
+    canViewEmployees
+      ?pool.query(`SELECT DISTINCT employee_type AS name FROM employees WHERE employee_type<>'' ORDER BY employee_type`):Promise.resolve({rows:[]}),
+  ]);
+  let employees=[];
+  let projects=[];
+  if(canInvite||canTargetAnnouncements){
+    employees=(await pool.query("SELECT id,full_name,email FROM employees WHERE status='active' ORDER BY full_name")).rows;
+  }
+  if(canInvite){
+    projects=(await pool.query("SELECT id,name FROM projects WHERE status NOT IN ('Draft','Cancelled') ORDER BY name")).rows;
+  }
+  res.json({vendors,roles,permissions,employeeTypes:employeeTypes.map(({name})=>name),employees,projects});
+}));
+
+router.post('/upload/resume', requireAuth, resumeUpload.single('file'), asyncRoute(async(req,res)=>{
+  if(!req.file)return res.status(400).json({error:'Choose a PDF, DOC, or DOCX resume to upload.'});
+  const employeeId=text(req.body.employeeId)||req.session.user.id;
+  if(employeeId!==req.session.user.id&&!await hasPermission(req.session.user,'employees.edit')) {
+    return res.status(403).json({error:'You may only upload your own resume.'});
+  }
+  const {rows}=await pool.query('SELECT resume_url FROM employees WHERE id=$1',[employeeId]);
+  if(!rows[0])return res.status(404).json({error:'Employee not found.'});
+  const stored=await savePrivateUpload(req.file);
+  const fileUrl=`/api/private-files/${stored.fileName}`;
+  try {
+    await inTransaction(async(client)=>{
+      await client.query('UPDATE employees SET resume_url=$2,updated_at=NOW() WHERE id=$1',[employeeId,fileUrl]);
+      await client.query("DELETE FROM employee_documents WHERE employee_id=$1 AND document_type='resume'",[employeeId]);
+      await client.query(
+        `INSERT INTO employee_documents (employee_id,document_type,file_name,file_url,mime_type,size_bytes)
+         VALUES ($1,'resume',$2,$3,$4,$5)`,
+        [employeeId,stored.originalName,fileUrl,stored.mimeType,stored.sizeBytes],
+      );
+    });
+  } catch(error) {
+    await removePrivateFile(stored.filePath);
+    throw error;
+  }
+  const previous=rows[0].resume_url;
+  if(previous&&previous!==fileUrl) {
+    try {
+      if(previous.startsWith('/api/private-files/')) {
+        const oldFile=await readPrivateFile(previous.split('/').pop());
+        if(oldFile)await removePrivateFile(oldFile.filePath);
+      } else {
+        await deleteFile(previous);
+      }
+    } catch(error) {
+      console.error('Replaced resume cleanup failed:',error.message);
+    }
+  }
+  res.json({message:'Resume uploaded securely.',fileUrl});
+}));
+
+router.post('/upload/:kind', requireAuth, upload.single('file'), asyncRoute(async (req,res)=>{
+  const kind=req.params.kind;
+  const folder=kind==='project'?'project-attachments':'employee-documents';
+  if(!['profile-photo','resume','id-proof','project'].includes(kind))return res.status(400).json({error:'Unsupported upload type.'});
+  if(!req.file)return res.status(400).json({error:'Choose a file to upload.'});
+  const employeeId=text(req.body.employeeId)||req.session.user.id;
+  if(kind!=='project' && employeeId!==req.session.user.id && req.session.user.role!=='Super Admin') {
+    const canEdit = await pool.query(`SELECT 1 FROM employees e JOIN role_permissions rp ON rp.role_id=e.role_id
+      JOIN permissions p ON p.id=rp.permission_id WHERE e.id=$1 AND p.code='employees.edit'`,[req.session.user.id]);
+    if(!canEdit.rowCount)return res.status(403).json({error:'You may only upload your own documents.'});
+  }
+  if(kind==='project'){
+    if(!await hasPermission(req.session.user,'projects.edit'))return res.status(403).json({error:'You do not have permission to upload project attachments.'});
+    const projectId=required(req.body.projectId,'Project');
+    const projectExists=await pool.query('SELECT 1 FROM projects WHERE id=$1',[projectId]);
+    if(!projectExists.rowCount)return res.status(404).json({error:'Project not found.'});
+  } else {
+    const employeeExists=await pool.query('SELECT 1 FROM employees WHERE id=$1',[employeeId]);
+    if(!employeeExists.rowCount)return res.status(404).json({error:'Employee not found.'});
+  }
+  const column=kind==='project'?null:{'profile-photo':'profile_photo_url',resume:'resume_url','id-proof':'id_proof_url'}[kind];
+  const previous=column?(await pool.query(`SELECT ${column} AS file_url FROM employees WHERE id=$1`,[employeeId])).rows[0]?.file_url:null;
+  const stored=await uploadFile(req.file,folder);
+  if(kind!=='project'){
+    await inTransaction(async(client)=>{
+      await client.query(`UPDATE employees SET ${column}=$2,updated_at=NOW() WHERE id=$1`,[employeeId,stored.fileUrl]);
+      await client.query('DELETE FROM employee_documents WHERE employee_id=$1 AND document_type=$2',[employeeId,kind]);
+      await client.query('INSERT INTO employee_documents (employee_id,document_type,file_name,file_url,mime_type,size_bytes) VALUES ($1,$2,$3,$4,$5,$6)',[employeeId,kind,req.file.originalname,stored.fileUrl,req.file.mimetype,req.file.size]);
+    });
+  } else {
+    const projectId=required(req.body.projectId,'Project');
+    await pool.query('INSERT INTO project_attachments (project_id,file_name,file_url,mime_type,size_bytes) VALUES ($1,$2,$3,$4,$5)',[projectId,req.file.originalname,stored.fileUrl,req.file.mimetype,req.file.size]);
+  }
+  let warning;
+  if(previous&&previous!==stored.fileUrl){
+    try{await deleteFile(previous);}
+    catch(error){warning='The new file was saved, but the previous Bunny CDN file could not be removed.';console.error('Replaced file cleanup failed:',error.message);}
+  }
+  res.status(201).json({data:stored,warning});
+}));
+
+router.delete('/employee-documents/:id', requireAuth, asyncRoute(async(req,res)=>{
+  const {rows}=await pool.query('SELECT id,employee_id,document_type,file_url FROM employee_documents WHERE id=$1',[req.params.id]);
+  const document=rows[0];
+  if(!document)return res.status(404).json({error:'Document not found.'});
+  if(document.employee_id!==req.session.user.id&&!await hasPermission(req.session.user,'employees.edit'))return res.status(403).json({error:'You do not have permission to delete this document.'});
+  const column={'profile-photo':'profile_photo_url',resume:'resume_url','id-proof':'id_proof_url'}[document.document_type];
+  const isPrivateFile=['resume','profile-photo'].includes(document.document_type)&&document.file_url.startsWith('/api/private-files/');
+  if(isPrivateFile){
+    const privateResume=await readPrivateFile(document.file_url.split('/').pop());
+    if(privateResume)await removePrivateFile(privateResume.filePath);
+  } else await deleteFile(document.file_url);
+  await inTransaction(async(client)=>{
+    if(column)await client.query(`UPDATE employees SET ${column}=NULL,updated_at=NOW() WHERE id=$1 AND ${column}=$2`,[document.employee_id,document.file_url]);
+    await client.query('DELETE FROM employee_documents WHERE id=$1',[document.id]);
+  });
+  res.status(204).end();
+}));
+
+router.delete('/project-attachments/:id', permission('projects.edit'), asyncRoute(async(req,res)=>{
+  const {rows}=await pool.query('SELECT id,file_url FROM project_attachments WHERE id=$1',[req.params.id]);
+  if(!rows[0])return res.status(404).json({error:'Project attachment not found.'});
+  await deleteFile(rows[0].file_url);
+  await inTransaction(async(client)=>{await client.query('DELETE FROM project_attachments WHERE id=$1',[req.params.id]);});
+  res.status(204).end();
+}));
+
+router.post('/invitations', permission('invitations.send'), asyncRoute(async (req,res)=>{
+  const {projectId,employeeIds,subject,message}=req.body;
+  if(!Array.isArray(employeeIds)||!employeeIds.length||employeeIds.length>100)return res.status(400).json({error:'Select between 1 and 100 employees.'});
+  const emailSubject=required(subject,'Email subject');
+  const emailMessage=required(message,'Invitation message');
+  if(!config.email.host||!config.email.from)return res.status(503).json({error:'Email provider is not configured.'});
+  const {rows:projectRows}=await pool.query('SELECT name FROM projects WHERE id=$1',[projectId]);
+  if(!projectRows[0])return res.status(404).json({error:'Project not found.'});
+  const transporter=nodemailer.createTransport({host:config.email.host,port:config.email.port,secure:config.email.port===465,auth:config.email.user?{user:config.email.user,pass:config.email.password}:undefined});
+  const outcomes=[];
+  for(const employeeId of employeeIds){
+    const {rows}=await pool.query('SELECT id,email,full_name FROM employees WHERE id=$1 AND status=$2',[employeeId,'active']);
+    if(!rows[0])continue;
+    let status='Sent';
+    try {
+      await transporter.sendMail({from:config.email.from,to:rows[0].email,subject:emailSubject,text:`${emailMessage}\n\nProject: ${projectRows[0].name}`});
+    } catch (error) {
+      status='Failed';
+      console.error(`Invitation email failed for employee ${rows[0].id}:`,error.message);
+    }
+    await pool.query(`INSERT INTO project_invitations (project_id,employee_id,subject,message,status)
+      VALUES ($1,$2,$3,$4,$5) ON CONFLICT (project_id,employee_id) DO UPDATE SET subject=EXCLUDED.subject,message=EXCLUDED.message,status=EXCLUDED.status,created_at=NOW()`,
+      [projectId,employeeId,emailSubject,emailMessage,status]);
+    outcomes.push({employeeId,status});
+  }
+  res.status(201).json({data:outcomes});
+}));
+
+router.get('/reports/summary', permission('reports.view'), asyncRoute(async (_req,res)=>{
+  const {rows}=await pool.query(`SELECT
+    (SELECT COUNT(*)::int FROM employees WHERE status='active') AS active_employees,
+    (SELECT COUNT(*)::int FROM projects WHERE status='Published') AS published_projects,
+    (SELECT COUNT(*)::int FROM project_applications WHERE status='Pending') AS pending_applications,
+    (SELECT COUNT(*)::int FROM project_assignments) AS assignments`);
+  res.json({data:rows[0]});
+}));
+
+router.use((error,req,res,_next)=>{
+  if(error instanceof multer.MulterError)return res.status(error.code==='LIMIT_FILE_SIZE'?413:400).json({error:error.code==='LIMIT_FILE_SIZE'?(req.path.startsWith('/auth/register/')?'File must be no larger than 5 MB.':'File must be no larger than 10 MB.'):error.message});
+  if(error.code==='23505')return res.status(409).json({error:'A record with the same unique value already exists.'});
+  if(error.code==='23503'||error.code==='23514')return res.status(400).json({error:'One or more supplied values are not valid for this record.'});
+  const status=Number(error.status)||500;
+  if(status>=500)console.error(error);
+  const message=error.publicMessage?error.message:status>=500&&status!==503?'The request could not be completed.':error.message;
+  res.status(status).json({error:message});
+});

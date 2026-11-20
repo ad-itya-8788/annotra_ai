@@ -4,6 +4,11 @@ export default defineConfig({
   server: {
     host: '::',
     strictPort: true,
-    proxy: { '/api': 'http://localhost:3001' },
+    proxy: {
+      '/api': {
+        target: 'https://backend-omega-five-59.vercel.app',
+        changeOrigin: true,
+      },
+    },
   },
 });

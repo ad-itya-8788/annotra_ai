@@ -9,6 +9,7 @@ import {
 import { api, setCsrfToken } from './api.js';
 import { FormsPage, PublicFormPage } from './Forms.jsx';
 import { updatePageMetadata } from './seo.js';
+import LandingPage from './LandingPage.jsx';
 
 const adminNav = [
   ['Dashboard', LayoutDashboard], ['Employees', Users], ['Projects', FolderClosed], ['Vendors', Building2], ['Forms', FilePlus2],
@@ -284,133 +285,6 @@ function AuthScreen({ onLogin, onBack }) {
   </div>;
 }
 
-const landingServices = [
-  { title: 'Image Annotation', description: 'Bounding boxes, segmentation, keypoints and more.', image: '/img/Image Annotation Street Scene.png', icon: Image },
-  { title: 'Video Annotation', description: 'Object tracking, frame labeling and action recognition.', image: '/img/Image Annotation Street Scene-3.png', icon: Activity },
-  { title: 'Voice & Audio', description: 'Voice recording, transcription and speaker identification.', image: '/img/AI Annotation Workspace with Dog Companion-5.png', icon: Headphones },
-  { title: 'Text & Documents', description: 'OCR, text classification and entity labeling.', image: '/img/emplooye.png', icon: FileText },
-  { title: 'Face Annotation', description: 'Face detection, landmarks and expression labeling.', image: '/img/AI Annotation Workspace with Woman and Dog-4.png', icon: UserRound },
-  { title: 'LiDAR / 3D Annotation', description: '3D point cloud labeling and object detection.', image: '/img/Image Annotation Street Scene-2.png', icon: FolderClosed },
-];
-
-function LandingPage({ onLogin }) {
-  return <div className="landing-page">
-    <header className="landing-header">
-      <a className="landing-brand" href="#home" aria-label="Annotra AI home">
-        <img src="/img/Annotra AI Circular Tech Badge.png" alt="" />
-        <span><b>Annotra</b><small>DATA ANNOTATION</small></span>
-      </a>
-      <nav className="landing-nav" aria-label="Main navigation">
-        <a className="active" href="#home">Home</a>
-        <a href="#services">Services</a>
-        <a href="#how-it-works">How it works</a>
-        <a href="#about">About us</a>
-        <a href="#contact">Contact</a>
-      </nav>
-      <div className="landing-header-actions">
-        <button className="landing-login" onClick={onLogin}>Team Login</button>
-        <a className="landing-start" href="#contact">Get a Quote <ChevronRight size={15}/></a>
-      </div>
-    </header>
-
-    <main>
-      <section className="landing-hero" id="home">
-        <div className="landing-hero-inner">
-          <div className="landing-hero-copy">
-            <span className="landing-eyebrow">YOUR DATA ANNOTATION SERVICES PARTNER</span>
-            <h1>High-Quality Data Annotation, <em>Delivered by Our Team</em></h1>
-            <p>We help businesses prepare reliable training data with skilled annotators, dedicated quality reviewers and a team that scales to your needs.</p>
-            <div className="landing-hero-actions">
-              <a className="landing-primary" href="#services">Explore Our Services <ChevronRight size={16}/></a>
-              <a className="landing-secondary" href="#contact">Talk to Our Team</a>
-            </div>
-            <div className="landing-benefits">
-              <div><span><FolderClosed size={19}/></span><p><b>Skilled Annotators</b><small>People trained for your data and guidelines</small></p></div>
-              <div><span><Shield size={19}/></span><p><b>Quality Reviewed</b><small>Careful checks before delivery</small></p></div>
-              <div><span><Users size={19}/></span><p><b>Flexible Team</b><small>Capacity that grows with your needs</small></p></div>
-              <div><span><LockKeyhole size={19}/></span><p><b>Secure Handling</b><small>Your data stays protected</small></p></div>
-            </div>
-          </div>
-          <div className="landing-hero-visual">
-            <div className="hero-visual-glow"/>
-            <img className="hero-main-image" src="/img/AI Annotation Workspace with Woman and Dog-4.png" alt="Annotator reviewing image, face, text and 3D labeling work" />
-            <div className="hero-note hero-note-top"><span><Image size={15}/></span><b>Image & Video Annotation</b><small>Accurate labels, every frame</small></div>
-            <div className="hero-note hero-note-bottom"><span><Shield size={15}/></span><b>Quality you can trust</b><small>Review-ready annotation teams</small></div>
-          </div>
-        </div>
-      </section>
-
-      <section className="landing-services landing-section" id="services">
-        <div className="landing-section-heading">
-          <span className="landing-eyebrow">OUR CAPABILITIES</span>
-          <h2>Our <em>Data Annotation Services</em></h2>
-          <p>Our experienced team labels and reviews the data that powers AI and machine learning.</p>
-        </div>
-        <div className="service-grid">
-          {landingServices.map(({ title, description, image, icon: Icon })=><article className="service-card" key={title}>
-            <div className="service-card-title"><span><Icon size={18}/></span><h3>{title}</h3></div>
-            <img src={image} alt="" loading="lazy"/>
-            <p>{description}</p>
-            <a href="#contact">Learn More <ChevronRight size={13}/></a>
-          </article>)}
-        </div>
-      </section>
-
-      <section className="landing-how landing-section" id="how-it-works">
-        <div className="landing-section-heading">
-          <span className="landing-eyebrow">FROM YOUR BRIEF TO QUALITY-CHECKED DATA</span>
-          <h2>How We <em>Deliver</em></h2>
-          <p>A dedicated Annotra team takes your data through a clear, quality-focused delivery process.</p>
-        </div>
-        <div className="workflow-steps">
-          <article><span className="workflow-icon"><ClipboardList size={29}/><i>1</i></span><div><h3>Understand Your Needs</h3><p>We learn about your data, goals and annotation guidelines.</p></div></article>
-          <ChevronRight className="workflow-arrow" size={25}/>
-          <article><span className="workflow-icon"><Users size={29}/><i>2</i></span><div><h3>Annotate & Review</h3><p>Our annotators label your data and reviewers check the work.</p></div></article>
-          <ChevronRight className="workflow-arrow" size={25}/>
-          <article><span className="workflow-icon"><BarChart3 size={29}/><i>3</i></span><div><h3>Deliver & Support</h3><p>Receive quality-checked data with updates from our team.</p></div></article>
-        </div>
-      </section>
-
-      <section className="landing-dashboard landing-section" id="about">
-        <div className="dashboard-copy">
-          <span className="landing-eyebrow">PEOPLE, PROCESS & QUALITY</span>
-          <h2>A Dedicated Team, <em>Managed with Care</em></h2>
-          <p>Behind every delivery is an experienced in-house team, supported by organized workflows and clear quality standards.</p>
-          <ul>
-            <li><Check size={16}/>Dedicated annotators and reviewers</li>
-            <li><Check size={16}/>Clear delivery milestones and updates</li>
-            <li><Check size={16}/>Quality checks throughout the process</li>
-            <li><Check size={16}/>Flexible capacity for ongoing work</li>
-            <li><Check size={16}/>Secure and responsible data handling</li>
-          </ul>
-          <a className="landing-primary" href="#contact">Work With Our Team <ChevronRight size={16}/></a>
-        </div>
-        <div className="dashboard-preview">
-          <img src="/img/AI Annotation Dashboard with a Friendly Team.png" alt="Annotra team collaborating on data annotation" loading="lazy"/>
-        </div>
-      </section>
-
-      <section className="landing-cta" id="contact">
-        <div>
-          <span className="landing-eyebrow">LOOKING FOR A RELIABLE ANNOTATION PARTNER?</span>
-          <h2>Let’s Talk About <em>Your Data</em></h2>
-          <p>Tell us what you need annotated. We’ll bring the right people and quality process to your data.</p>
-          <div className="landing-hero-actions">
-            <a className="landing-primary" href="mailto:hello@annotra.ai?subject=Data%20annotation%20services">Discuss Your Needs <ChevronRight size={16}/></a>
-            <button className="landing-secondary" onClick={onLogin}>Team Login</button>
-          </div>
-        </div>
-        <img src="/img/AI Annotation Workspace with Woman and Dog-4.png" alt="" loading="lazy"/>
-      </section>
-    </main>
-    <footer className="landing-footer">
-      <a className="landing-brand" href="#home"><img src="/img/Annotra AI Circular Tech Badge.png" alt=""/><span><b>Annotra</b><small>DATA ANNOTATION</small></span></a>
-      <p>Skilled people. Reliable data annotation. Quality you can trust.</p>
-      <span>© {new Date().getFullYear()} Annotra AI</span>
-    </footer>
-  </div>;
-}
-
 function Sidebar({ user, active, onNavigate, collapsed, setCollapsed, onLogout, workspaceName, supportEmail }) {
   const annotator = user.role === 'Annotator';
   const roleLinks = user.role === 'Reviewer' ? reviewerNav : user.role === 'Team Lead' ? teamLeadNav : adminNav;
@@ -418,7 +292,8 @@ function Sidebar({ user, active, onNavigate, collapsed, setCollapsed, onLogout, 
   return <>
     <aside className={`sidebar ${collapsed?'collapsed':''}`}>
       <div className="brand-lockup sidebar-brand"><span className="brand-mark"><img src="/img/Annotra AI Circular Tech Badge.png" alt=""/></span><span className="brand-text"><b>{workspaceName||'Annotra AI'}</b><small>Team Management Workspace</small></span></div>
-      <nav className="sidebar-nav">
+      <span className="sidebar-section-label">Workspace</span>
+      <nav className="sidebar-nav" aria-label="Workspace navigation">
         {links.map(([label,Icon])=><button key={label} className={`nav-link ${active===label?'selected':''}`} onClick={()=>onNavigate(label)} title={label}><Icon size={17}/><span>{label}</span>{label==='Announcements'&&annotator&&<i className="nav-count">2</i>}</button>)}
         <button className="nav-link" onClick={onLogout} title="Logout"><LogOut size={17}/><span>Logout</span></button>
       </nav>
@@ -427,9 +302,10 @@ function Sidebar({ user, active, onNavigate, collapsed, setCollapsed, onLogout, 
   </>;
 }
 
-function Header({ user, onMenu, query, setQuery, onLogout, onNotifications, unreadCount }) {
+function Header({ user, page, onMenu, query, setQuery, onLogout, onNotifications, unreadCount }) {
   return <header className="topbar">
     <button className="icon-button menu-button" aria-label="Toggle menu" onClick={onMenu}><Menu size={18}/></button>
+    <div className="top-breadcrumb" aria-label="Breadcrumb"><span>{user.role}</span><ChevronRight size={12}/><b>{page}</b></div>
     <div className="top-search"><Search size={16}/><input aria-label="Search" placeholder="Search anything..." value={query} onChange={(e)=>setQuery(e.target.value)}/>{query&&<button onClick={()=>setQuery('')} aria-label="Clear search"><X size={14}/></button>}</div>
     <div className="top-actions">
       <button className="top-icon has-count" title="Notifications" onClick={onNotifications}><Bell size={17}/>{unreadCount>0&&<i>{Math.min(unreadCount,9)}</i>}</button>
@@ -783,7 +659,7 @@ function SettingsPage({ settings, preferences, canManageSettings, onSaveSettings
         <label htmlFor="workspace-name">Workspace name</label>
         <input id="workspace-name" maxLength={120} placeholder="Annotra AI" value={system.workspaceName||''} onChange={(event) => setSystem((current) => ({...current,workspaceName:event.target.value}))} required/>
         <label htmlFor="support-email">Support email</label>
-        <input id="support-email" type="email" maxLength={254} placeholder="support@example.com" value={system.supportEmail||''} onChange={(event) => setSystem((current) => ({...current,supportEmail:event.target.value}))}/>
+        <input id="support-email" type="email" maxLength={254} placeholder="annotrai.help@gmail.com" value={system.supportEmail||''} onChange={(event) => setSystem((current) => ({...current,supportEmail:event.target.value}))}/>
         <p>Workspace name and support contact are shared with all employees.</p>
         <button className="button primary" disabled={busy}>{busy?<LoaderCircle className="spin" size={15}/>:<Check size={15}/>}Save workspace settings</button>
       </form> : <div className="settings-readonly">
@@ -803,7 +679,7 @@ function SettingsPage({ settings, preferences, canManageSettings, onSaveSettings
   </div>;
 }
 
-function SearchableMultiSelect({ options = [], selected = [], onChange, label }) {
+function SearchableMultiSelect({ options = [], selected = [], onChange, label, emptyMessage = 'No active employees available.' }) {
   const [search, setSearch] = useState('');
   const matches = options.filter(([, name]) => name.toLowerCase().includes(search.trim().toLowerCase()));
   const selectedOptions = options.filter(([value]) => selected.includes(value));
@@ -834,7 +710,7 @@ function SearchableMultiSelect({ options = [], selected = [], onChange, label })
         <input type="checkbox" checked={selected.includes(value)} disabled={!selected.includes(value)&&selected.length>=100} onChange={(event) => toggle(value,event.target.checked)}/>
         <span>{name}</span>
       </label>)}
-      {!options.length&&<p className="employee-picker-empty">No active employees available.</p>}
+      {!options.length&&<p className="employee-picker-empty">{emptyMessage}</p>}
       {options.length>0&&!matches.length&&<p className="employee-picker-empty">No employees match “{search}”.</p>}
     </div>
   </div>;
@@ -887,20 +763,20 @@ function Modal({ type, lookups, record, onClose, onSubmit, busy }) {
           : []),
       ],
     },
-    invite:{title:'Send Project Invitations',fields:[['projectId','Project','select',lookups.projects?.map((p)=>[p.id,p.name])],['employeeIds','Select Employees','multiselect',lookups.employees?.map((employee)=>[employee.id,`${employee.full_name} - ${employee.email}`])],['subject','Email Subject'],['message','Invitation Message','textarea']]},
+    invite:{title:'Send Project Invitations',fields:[['projectId','Project','select',lookups.projects?.map((p)=>[p.id,p.name])],['employeeIds','Select Employees','multiselect',lookups.invitationRecipients?.map((employee)=>[employee.id,`${employee.full_name} - ${employee.email}`])],['subject','Email Subject'],['message','Invitation Message','textarea']]},
     review:{title:`${record.status} Application`,fields:[['remarks','Admin Remarks','textarea']]},
     role:{title: isEdit ? 'Edit Role' : 'Create Role',fields:[['name','Role Name'],['description','Description','textarea']]},
     profile:{title:'Update Profile',fields:[['fullName','Full Name'],['email','Email','email'],['dateOfBirth','Date of Birth','date'],['gender','Gender','select',[['Female','Female'],['Male','Male'],['Non-binary','Non-binary'],['Prefer not to say','Prefer not to say']]],['address','Address','textarea'],['skills','Skills (comma separated)'],['experienceYears','Experience (years)','number']]},
   };
   const config=configs[type];
   const handleSubmit=(event)=>{event.preventDefault();onSubmit(values);};
-  return <div className="modal-backdrop" onMouseDown={(e)=>{if(e.target===e.currentTarget)onClose();}}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  return <div className="modal-backdrop" onMouseDown={(e)=>{if(e.target===e.currentTarget)onClose();}}><section className={`modal-card ${type==='invite'?'invite-modal':''}`} role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <header><div><span className="modal-icon"><Plus size={17}/></span><h2 id="modal-title">{config.title}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17}/></button></header>
     <form onSubmit={handleSubmit}><div className="modal-fields">{config.fields.map(([key,label,kind,options])=>kind==='multiselect'
-      ?<div key={key} className="modal-field span-two"><span className="modal-field-label">{label}</span><SearchableMultiSelect options={options||[]} selected={values[key]||[]} onChange={(selected)=>set(key,selected)} label={label}/></div>
+      ?<div key={key} className="modal-field span-two"><span className="modal-field-label">{label}</span><SearchableMultiSelect options={options||[]} selected={values[key]||[]} onChange={(selected)=>set(key,selected)} label={label} emptyMessage={type==='invite'?'No active employees with email addresses. Add employee emails before sending invitations.':'No active employees available.'}/></div>
       :<label key={key} className={kind==='textarea'?'span-two':''}>{label}
         {kind==='textarea'?<textarea rows="3" placeholder={`Enter ${label.toLowerCase()}`} value={values[key]||''} onChange={(e)=>set(key,e.target.value)} required={['fullName','title','body','message'].includes(key)}/>:kind==='select'?<select value={values[key]||''} onChange={(e)=>set(key,e.target.value)} required><option value="">Select {label.toLowerCase()}</option>{options?.map(([value,name])=><option key={value} value={value}>{name}</option>)}</select>:kind==='file'?<input type="file" accept={options} onChange={(e)=>set(key,e.target.files?.[0]||null)}/>:<input type={['date','email','tel','number'].includes(kind)?kind:'text'} placeholder={kind==='date'?undefined:`Enter ${label.toLowerCase()}`} value={values[key]||''} onChange={(e)=>set(key,e.target.value)} required={['fullName','email','mobile','name','code','vendorId','companyName','contactPerson','projectId','subject','roleId'].includes(key)}/>}
-      </label>)}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy}>{busy?<LoaderCircle className="spin" size={15}/>:<Check size={15}/>}Save</button></div></form>
+      </label>)}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy||(type==='invite'&&!(values.employeeIds||[]).length)}>{busy?<LoaderCircle className="spin" size={15}/>:type==='invite'?<Send size={15}/>:<Check size={15}/>} {type==='invite'?'Send Invitations':'Save'}</button></div></form>
   </section></div>;
 }
 
@@ -918,7 +794,7 @@ export default function App() {
   const [employeePagination,setEmployeePagination]=useState({page:1,pageSize:25,total:0,totalPages:0});
   const [listFilters,setListFilters]=useState(initialListFilters);
   const [listPagination,setListPagination]=useState({page:1,pageSize:25,total:0,totalPages:0});
-  const [settings,setSettings]=useState({workspaceName:'Annotra AI',supportEmail:''});
+  const [settings,setSettings]=useState({workspaceName:'Annotra AI',supportEmail:'annotrai.help@gmail.com'});
   const [preferences,setPreferences]=useState({compactMode:false,hideWelcome:false});
   const [query,setQuery]=useState('');
   const [error,setError]=useState('');
@@ -953,7 +829,7 @@ export default function App() {
     Promise.all([api('/settings'),api('/preferences')])
       .then(([systemResult,preferenceResult])=>{
         if(!active)return;
-        setSettings(systemResult.data);
+        setSettings({...systemResult.data,supportEmail:systemResult.data.supportEmail||'annotrai.help@gmail.com'});
         setPreferences(preferenceResult.data);
       })
       .catch((e)=>{if(active)setError(e.message);});
@@ -1063,6 +939,8 @@ export default function App() {
 
   async function submitModal(values) {
     setBusy(true);setError('');
+    let completionMessage='Your changes have been saved.';
+    let invitationFailures=false;
     try {
       const body={...values};
       const uploadSpecs=modal.type==='employee'?[['profile-photo','profilePhoto'],['resume','resume'],['id-proof','idProof']]:modal.type==='project'?[['project','attachment']]:[];
@@ -1076,7 +954,14 @@ export default function App() {
         await api(`/applications/${modal.record.id}`,{method:'PATCH',body:JSON.stringify({status:modal.status,remarks:body.remarks})});
       } else if(modal.type==='invite') {
         body.employeeIds=Array.isArray(body.employeeIds)?body.employeeIds:body.employeeIds.split(',').map((item)=>item.trim()).filter(Boolean);
-        await api('/invitations',{method:'POST',body:JSON.stringify(body)});
+        const result=await api('/invitations',{method:'POST',body:JSON.stringify(body)});
+        if(!Array.isArray(result.data))throw new Error('The invitation service returned an invalid response.');
+        const sent=result.data.filter((outcome)=>outcome.status==='Sent').length;
+        const failed=result.data.length-sent;
+        invitationFailures=failed>0;
+        completionMessage=failed
+          ?`${sent} invitation${sent===1?'':'s'} sent; ${failed} failed. Check email settings and invitation statuses.`
+          :`${sent} invitation${sent===1?'':'s'} sent successfully.`;
       } else if(modal.type==='profile') {
         const result=await api(`/employees/${user.id}`,{method:'PATCH',body:JSON.stringify(body)});
         setUser((previous)=>({...previous,name:result.data.full_name}));
@@ -1126,7 +1011,9 @@ export default function App() {
         const path={employee:'/employees',project:'/projects',vendor:'/vendors',announcement:'/announcements',role:'/roles'}[modal.type];
         await api(path,{method:'POST',body:JSON.stringify(body)});
       }
-      setModal(null);notify('Your changes have been saved.');await refresh();
+      setModal(null);await refresh();
+      if(invitationFailures)setError(completionMessage);
+      else notify(completionMessage);
     } catch(e){setError(e.message);}
     finally{setBusy(false);}
   }
@@ -1222,7 +1109,7 @@ export default function App() {
   const createAllowed=Boolean(actionPermission[page]&&userHasPermission(user,actionPermission[page]));
   return <div className={`app-shell${preferences.compactMode?' compact-mode':''}`}>
     <Sidebar user={user} active={page} onNavigate={(target)=>{navigate(target);setCollapsed(false);}} collapsed={collapsed} setCollapsed={setCollapsed} onLogout={logout} workspaceName={settings.workspaceName} supportEmail={settings.supportEmail}/>
-    <div className="main-column"><Header user={user} query={query} setQuery={setQuery} onMenu={()=>setCollapsed(!collapsed)} onLogout={logout} onNotifications={()=>navigate('Notifications')} unreadCount={data?.activity?.filter((item)=>!item.read_at).length||0}/>
+    <div className="main-column"><Header user={user} page={page} query={query} setQuery={setQuery} onMenu={()=>setCollapsed(!collapsed)} onLogout={logout} onNotifications={()=>navigate('Notifications')} unreadCount={data?.activity?.filter((item)=>!item.read_at).length||0}/>
       <main className="page-content">
         {page==='Dashboard'?<>{!dismissed&&!preferences.hideWelcome&&<Welcome user={user} employee={employee} dismiss={false} onDismiss={()=>setDismissed(true)} workspaceName={settings.workspaceName}/>}{error&&<div className="error-banner">{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}{data?(data.role==='team'?<TeamDashboard data={data} user={user} onNavigate={navigate}/>:employee?<EmployeeDashboard data={data} onNavigate={navigate} onApply={apply}/>:<AdminDashboard data={data} permissions={user.permissions} onNavigate={navigate}/>):<div className="dashboard-loading"><LoaderCircle className="spin"/>Loading your dashboard…</div>}</>:<><div className="page-title-row"><div><span className="eyebrow">{employee?'ANNOTATOR WORKSPACE':'ANNOTRA TEAM WORKSPACE'}</span><h1>{page}</h1><p>{page==='Forms'?'Build shareable forms, collect responses, and export your data.':page==='Roles & Permissions'?'Create role profiles and choose which permissions each role receives.':page==='Employees'?'Review registrations, manage account status, and assign authorized roles.':employee?`Welcome back, ${user.name.split(' ')[0]}. Here's your ${page.toLowerCase()} view.`:`Manage ${page.toLowerCase()} for your annotation team.`}</p></div>{createAllowed&&pageAction()&&<button className="button primary" onClick={pageAction()}><Plus size={16}/>{page==='Email Invitations'?'Send Invitations':page==='Roles & Permissions'?'Create Role':`Add ${page==='Employees'?'Employee':page==='Projects'?'Project':page==='Vendors'?'Vendor':'Announcement'}`}</button>}</div>{error&&<div className="error-banner">{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
           {page==='Settings'?<SettingsPage settings={settings} preferences={preferences} canManageSettings={user.permissions?.includes('settings.manage')||user.role==='Super Admin'} onSaveSettings={saveSettings} onSavePreferences={savePreferences} busy={busy}/>

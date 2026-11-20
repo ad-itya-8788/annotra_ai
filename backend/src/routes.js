@@ -18,8 +18,20 @@ router.use(requireCsrf);
 const otpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 3, standardHeaders: true, legacyHeaders: false });
 const verifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false });
 const passwordLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false });
-const registrationLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: true, legacyHeaders: false });
-const registrationOtpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 3, standardHeaders: true, legacyHeaders: false });
+const registrationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).json({ error: 'Too many registration attempts. Please wait before trying again.' }),
+});
+const registrationOtpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).json({ error: 'Too many verification requests. Please wait before requesting another code.' }),
+});
 const registrationVerifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false });
 const publicFormSubmissionLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false });
 const formResponseUpload = multer({
@@ -1246,14 +1258,20 @@ router.get('/lookups', requireAuth, asyncRoute(async (req,res)=>{
       ?pool.query(`SELECT DISTINCT employee_type AS name FROM employees WHERE employee_type<>'' ORDER BY employee_type`):Promise.resolve({rows:[]}),
   ]);
   let employees=[];
+  let invitationRecipients=[];
   let projects=[];
   if(canInvite||canTargetAnnouncements){
     employees=(await pool.query("SELECT id,full_name,email FROM employees WHERE status='active' ORDER BY full_name")).rows;
   }
   if(canInvite){
-    projects=(await pool.query("SELECT id,name FROM projects WHERE status NOT IN ('Draft','Cancelled') ORDER BY name")).rows;
+    const [{rows:inviteEmployees},{rows:availableProjects}]=await Promise.all([
+      pool.query("SELECT id,full_name,email FROM employees WHERE status='active' AND NULLIF(BTRIM(email),'') IS NOT NULL ORDER BY full_name"),
+      pool.query("SELECT id,name FROM projects WHERE status NOT IN ('Draft','Cancelled') ORDER BY name"),
+    ]);
+    invitationRecipients=inviteEmployees;
+    projects=availableProjects;
   }
-  res.json({vendors,roles,permissions,employeeTypes:employeeTypes.map(({name})=>name),employees,projects});
+  res.json({vendors,roles,permissions,employeeTypes:employeeTypes.map(({name})=>name),employees,invitationRecipients,projects});
 }));
 
 router.post('/upload/resume', requireAuth, resumeUpload.single('file'), asyncRoute(async(req,res)=>{
@@ -1368,25 +1386,39 @@ router.post('/invitations', permission('invitations.send'), asyncRoute(async (re
   if(!Array.isArray(employeeIds)||!employeeIds.length||employeeIds.length>100)return res.status(400).json({error:'Select between 1 and 100 employees.'});
   const emailSubject=required(subject,'Email subject');
   const emailMessage=required(message,'Invitation message');
-  if(!config.email.host||!config.email.from)return res.status(503).json({error:'Email provider is not configured.'});
+  if(!config.email.host||!config.email.port||!config.email.user||!config.email.password||!config.email.from) {
+    return res.status(503).json({error:'Email is not configured. Set EMAIL_USER, EMAIL_PASSWORD, and EMAIL_FROM in the backend environment.'});
+  }
   const {rows:projectRows}=await pool.query('SELECT name FROM projects WHERE id=$1',[projectId]);
   if(!projectRows[0])return res.status(404).json({error:'Project not found.'});
-  const transporter=nodemailer.createTransport({host:config.email.host,port:config.email.port,secure:config.email.port===465,auth:config.email.user?{user:config.email.user,pass:config.email.password}:undefined});
+  const selectedIds=[...new Set(employeeIds)];
+  const {rows:recipients}=await pool.query(
+    "SELECT id,email,full_name FROM employees WHERE id=ANY($1::uuid[]) AND status='active' ORDER BY full_name",
+    [selectedIds],
+  );
+  if(recipients.length!==selectedIds.length)return res.status(400).json({error:'Some selected employees are no longer active. Refresh the list and try again.'});
+  if(recipients.some((employee)=>!employee.email?.trim())) {
+    return res.status(400).json({error:'Add an email address to every selected employee before sending invitations.'});
+  }
+  const transporter=nodemailer.createTransport({
+    host:config.email.host,
+    port:config.email.port,
+    secure:config.email.port===465,
+    auth:{user:config.email.user,pass:config.email.password},
+  });
   const outcomes=[];
-  for(const employeeId of employeeIds){
-    const {rows}=await pool.query('SELECT id,email,full_name FROM employees WHERE id=$1 AND status=$2',[employeeId,'active']);
-    if(!rows[0])continue;
+  for(const employee of recipients){
     let status='Sent';
     try {
-      await transporter.sendMail({from:config.email.from,to:rows[0].email,subject:emailSubject,text:`${emailMessage}\n\nProject: ${projectRows[0].name}`});
+      await transporter.sendMail({from:config.email.from,to:employee.email,subject:emailSubject,text:`${emailMessage}\n\nProject: ${projectRows[0].name}`});
     } catch (error) {
       status='Failed';
-      console.error(`Invitation email failed for employee ${rows[0].id}:`,error.message);
+      console.error(`Invitation email failed for employee ${employee.id}:`,error.message);
     }
     await pool.query(`INSERT INTO project_invitations (project_id,employee_id,subject,message,status)
       VALUES ($1,$2,$3,$4,$5) ON CONFLICT (project_id,employee_id) DO UPDATE SET subject=EXCLUDED.subject,message=EXCLUDED.message,status=EXCLUDED.status,created_at=NOW()`,
-      [projectId,employeeId,emailSubject,emailMessage,status]);
-    outcomes.push({employeeId,status});
+      [projectId,employee.id,emailSubject,emailMessage,status]);
+    outcomes.push({employeeId:employee.id,status});
   }
   res.status(201).json({data:outcomes});
 }));

@@ -2,7 +2,7 @@ import { config } from '../config.js';
 
 function assertConfigured() {
   if (!config.messageCentral.customerId || !config.messageCentral.authToken) {
-    throw Object.assign(new Error('Message Central is not configured. Set its customer ID and API key in backend/.env.'),{status:503});
+    throw Object.assign(new Error('SMS verification is not configured. Set MESSAGE_CENTRAL_CUSTOMER_ID and MESSAGE_CENTRAL_AUTH_TOKEN in the backend environment.'),{status:503});
   }
 }
 
@@ -43,16 +43,21 @@ async function request(url, parameters) {
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
       throw Object.assign(
-        new Error('Message Central rejected its configured credentials. Check MESSAGE_CENTRAL_CUSTOMER_ID and MESSAGE_CENTRAL_AUTH_TOKEN in backend/.env.'),
+        new Error('Message Central rejected its configured credentials. Check MESSAGE_CENTRAL_CUSTOMER_ID and MESSAGE_CENTRAL_AUTH_TOKEN in the backend environment.'),
         { status: 502, publicMessage: true },
       );
     }
     if (response.status === 429) {
       throw Object.assign(new Error('Message Central rate limit exceeded. Please try again later.'), { status: 429, publicMessage: true });
     }
-    throw Object.assign(new Error(`Message Central returned HTTP ${response.status}.`), { status: 502 });
+    throw Object.assign(
+      new Error(`Message Central returned HTTP ${response.status}. Check the SMS provider settings and account status.`),
+      { status: 502, publicMessage: true },
+    );
   }
-  if (!body || typeof body !== 'object') throw Object.assign(new Error('Message Central returned an invalid response.'), { status: 502 });
+  if (!body || typeof body !== 'object') {
+    throw Object.assign(new Error('Message Central returned an invalid response.'), { status: 502, publicMessage: true });
+  }
   return body;
 }
 
@@ -74,7 +79,12 @@ export async function sendOtp(mobile) {
     || body.verificationId
     || body.data?.requestId
     || body.requestId;
-  if (!verificationId) throw new Error(body.message || 'Message Central did not return a verification ID.');
+  if (!verificationId) {
+    throw Object.assign(
+      new Error('Message Central did not return a verification ID. Check the SMS provider response and configuration.'),
+      { status: 502, publicMessage: true },
+    );
+  }
   return String(verificationId);
 }
 

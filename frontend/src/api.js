@@ -16,7 +16,22 @@ export async function api(path, options = {}) {
     credentials: 'include',
   });
   if (response.status === 204) return null;
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || 'The request could not be completed.');
+  const body = await response.text();
+  let payload = {};
+  if (body) {
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      if (!response.ok && response.status === 429) {
+        payload = { error: 'Too many requests. Please wait before trying again.' };
+      }
+    }
+  }
+  if (!response.ok) {
+    const message = payload && typeof payload === 'object' && typeof payload.error === 'string'
+      ? payload.error
+      : 'The request could not be completed.';
+    throw new Error(message);
+  }
   return payload;
 }

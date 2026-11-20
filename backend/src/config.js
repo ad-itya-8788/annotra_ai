@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.env') });
 
 const envValue = (name, fallback = '') => process.env[name]?.trim() || fallback;
+const messageCentralEnvValue = (name, legacyName, fallback = '') =>
+  envValue(name) || envValue(legacyName, fallback);
 const frontendUrl = envValue('FRONTEND_URL', 'http://localhost:5173').replace(/\/+$/, '');
 const requestedPrivateFileMaxBytes = Number(process.env.PRIVATE_FILE_MAX_BYTES || 5 * 1024 * 1024);
 const databaseSslCaPath = process.env.DB_SSL_CA_PATH?.trim();
@@ -34,11 +36,14 @@ export const config = {
   },
   sessionSecret: process.env.SESSION_SECRET,
   messageCentral: {
-    sendUrl: envValue('MESSAGE_CENTRAL_SEND_OTP_URL', 'https://cpaas.messagecentral.com/verification/v3/send'),
-    verifyUrl: envValue('MESSAGE_CENTRAL_VALIDATE_OTP_URL', 'https://cpaas.messagecentral.com/verification/v3/validateOtp'),
-    customerId: envValue('MESSAGE_CENTRAL_CUSTOMER_ID'),
-    authToken: envValue('MESSAGE_CENTRAL_AUTH_TOKEN'),
-    countryCode: envValue('MESSAGE_CENTRAL_COUNTRY_CODE', '91'),
+    sendUrl: messageCentralEnvValue('MESSAGE_CENTRAL_SEND_OTP_URL', 'MESSAGECENTRAL_SEND_OTP_URL', 'https://cpaas.messagecentral.com/verification/v3/send'),
+    verifyUrl: messageCentralEnvValue('MESSAGE_CENTRAL_VALIDATE_OTP_URL', 'MESSAGECENTRAL_VALIDATE_OTP_URL', 'https://cpaas.messagecentral.com/verification/v3/validateOtp'),
+    customerId: messageCentralEnvValue('MESSAGE_CENTRAL_CUSTOMER_ID', 'MESSAGECENTRAL_CUSTOMER_ID'),
+    authToken: envValue('MESSAGE_CENTRAL_AUTH_TOKEN')
+      || envValue('MESSAGE_CENTRAL_API_KEY')
+      || envValue('MESSAGECENTRAL_AUTH_TOKEN')
+      || envValue('MESSAGECENTRAL_API_KEY'),
+    countryCode: messageCentralEnvValue('MESSAGE_CENTRAL_COUNTRY_CODE', 'MESSAGECENTRAL_COUNTRY_CODE', '91'),
   },
   bunny: {
     storageZone: envValue('BUNNY_STORAGE_ZONE'),
@@ -47,11 +52,11 @@ export const config = {
     region: process.env.BUNNY_STORAGE_REGION || '',
   },
   email: {
-    host: process.env.EMAIL_HOST,
-    port: Number(process.env.EMAIL_PORT || 587),
-    user: process.env.EMAIL_USER,
-    password: process.env.EMAIL_PASSWORD,
-    from: process.env.EMAIL_FROM,
+    host: envValue('EMAIL_HOST', 'smtp.gmail.com'),
+    port: Number(envValue('EMAIL_PORT', '587')),
+    user: envValue('EMAIL_USER'),
+    password: envValue('EMAIL_PASSWORD'),
+    from: envValue('EMAIL_FROM') || envValue('EMAIL_USER'),
   },
   privateFileDirectory: process.env.PRIVATE_FILE_DIRECTORY || '',
   privateFileMaxBytes: Number.isSafeInteger(requestedPrivateFileMaxBytes) && requestedPrivateFileMaxBytes > 0

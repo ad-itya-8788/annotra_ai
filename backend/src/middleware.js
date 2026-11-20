@@ -1,4 +1,5 @@
 import { pool } from './db.js';
+import { config } from './config.js';
 
 export function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
@@ -69,7 +70,7 @@ export function permission(code) {
 export function requireCsrf(req, res, next) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   const origin = req.get('origin');
-  if (origin && origin !== process.env.FRONTEND_URL && origin !== 'http://localhost:5173') {
+  if (origin && origin !== config.frontendUrl && origin !== 'http://localhost:5173') {
     return res.status(403).json({ error: 'Request origin is not allowed.' });
   }
   if (!req.session.user) return next();

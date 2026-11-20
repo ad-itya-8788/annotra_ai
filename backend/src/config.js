@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.env') });
 
 const envValue = (name, fallback = '') => process.env[name]?.trim() || fallback;
+const frontendUrl = envValue('FRONTEND_URL', 'http://localhost:5173').replace(/\/+$/, '');
 const requestedPrivateFileMaxBytes = Number(process.env.PRIVATE_FILE_MAX_BYTES || 5 * 1024 * 1024);
 const databaseSslCaPath = process.env.DB_SSL_CA_PATH?.trim();
 const databaseSslRejectUnauthorized = process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false';
@@ -16,7 +17,7 @@ const databaseSslCa = databaseSslCaPath
 export const config = {
   port: Number(process.env.PORT || 3001),
   nodeEnv: process.env.NODE_ENV || 'development',
-  frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173',
+  frontendUrl,
   database: {
     connectionString: process.env.DATABASE_URL,
     host: process.env.DATABASE_URL ? undefined : process.env.DB_HOST || 'localhost',

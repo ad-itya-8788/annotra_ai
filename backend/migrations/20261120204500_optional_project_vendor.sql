@@ -1,0 +1,1 @@
+ALTER TABLE projects ALTER COLUMN vendor_id DROP NOT NULL;

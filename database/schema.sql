@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS projects (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   code TEXT NOT NULL UNIQUE,
-  vendor_id UUID NOT NULL REFERENCES vendors(id),
+  vendor_id UUID REFERENCES vendors(id),
   description TEXT NOT NULL DEFAULT '',
   instructions TEXT NOT NULL DEFAULT '',
   required_skills TEXT[] NOT NULL DEFAULT '{}',

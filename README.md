@@ -81,6 +81,28 @@ Workspace pages use clean history URLs (for example `http://localhost:5173/emplo
 npm run db:migrate --prefix backend
 ```
 
+### Email invitations
+
+Project invitations are sent through SMTP from the backend. Set these variables in `backend/.env` for local development, or in your backend hosting provider's environment settings for deployment:
+
+```text
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_USER=your-mailbox@example.com
+EMAIL_PASSWORD=your-smtp-password-or-app-password
+EMAIL_FROM="Annotra AI <your-mailbox@example.com>"
+```
+
+For Gmail, use a 16-character Google App Password rather than the account password, and keep 2-factor authentication enabled. `EMAIL_FROM` is optional when `EMAIL_USER` is a full email address; the backend uses the user as the sender in that case. The backend reads these values at startup, so restart or redeploy it after changing them.
+
+Check the configuration and SMTP login without sending an email:
+
+```powershell
+npm run email:check --prefix backend
+```
+
+The command prints only the configured sender, never the password. The **Email Invitations** page shows the live configuration status returned by the backend and disables sending when credentials are missing.
+
 ### Custom forms
 
 Users with `forms.manage` can create forms from the **Forms** workspace page. The Super Admin receives this permission from the migration; it can also be granted to other roles from **Roles & Permissions**. Forms support short/long text, email, phone, number, date, single-choice, checkbox, and dropdown questions. Publish a form to share its public `/forms/{slug}` URL. Public responses are rate-limited, validated by the API, stored in PostgreSQL, and visible only to users with `forms.manage`; response owners can export them as CSV. Deleting a form also deletes its responses.

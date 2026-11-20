@@ -491,7 +491,7 @@ function AnnouncementCards({ items, onNavigate }) {
 }
 function EmptyRow({ colSpan }) { return <tr><td className="table-empty" colSpan={colSpan}>No records found.</td></tr>; }
 
-function DataPage({ page, items, query, onCreate, onReview, onToggle, onReviewEmployee, onAssignRole, onEdit, onDelete, roles, vendors, employeeTypes, filters, pagination, onApplyEmployeeFilters, onApplyFilters, canApproveEmployees, canAssignRoles, canCreate, canEditEmployees, user }) {
+function DataPage({ page, items, query, onCreate, onReview, onToggle, onReviewEmployee, onAssignRole, onResetPassword, onEdit, onDelete, roles, vendors, employeeTypes, emailConfigured, emailMissing, emailFrom, filters, pagination, onApplyEmployeeFilters, onApplyFilters, canApproveEmployees, canAssignRoles, canCreate, canEditEmployees, user }) {
   const Icon=pageIcons[page]||FileText;
   const [draftFilters,setDraftFilters]=useState(filters||{});
   useEffect(()=>setDraftFilters(filters||{}),[filters]);
@@ -539,7 +539,7 @@ function DataPage({ page, items, query, onCreate, onReview, onToggle, onReviewEm
     </form>}
     <div className="table-scroll resource-table"><table><thead><tr>{columns.map(([,label])=><th key={label}>{label}</th>)}            {['Applications','Employees','Projects','Vendors','Announcements','Roles & Permissions','Notifications'].includes(page)&&<th>Actions</th>}</tr></thead><tbody>
       {filtered.map((row,index)=><tr key={row.id||index}>{columns.map(([key])=><td key={key}>{key==='details'&&page==='Audit Logs'?<code className="audit-details">{row[key]&&typeof row[key]==='object'?JSON.stringify(row[key]):row[key]||'-'}</code>:key==='status'||key==='priority'?<StatusBadge value={row[key]===true?'Published':row[key]===false?'Draft':row[key]}/>:key==='profile_photo_url'?row[key]?<img className="employee-table-photo" src={row[key]} alt={`${row.full_name} profile`}/>:<span className="muted">-</span>:key==='resume_url'?row[key]?<a className="resume-link" href={row[key]} target="_blank" rel="noreferrer">View / Download</a>:<span className="muted">-</span>:key==='linkedin_url'?row[key]?<a href={row[key]} target="_blank" rel="noreferrer">Profile</a>:<span className="muted">-</span>:key==='skills'||key==='permissions'?Array.isArray(row[key])?row[key].join(', '):row[key]:key.endsWith('_at')||key==='application_deadline'||key==='start_date'||key==='end_date'||key==='publish_at'||key==='expires_at'||key==='created_at'||key==='joiningDate'?fmtDate(row[key]):row[key]??'-'}</td>)}
-        {['Applications','Employees'].includes(page)&&<td className="actions-cell">{page==='Applications'&&row.status==='Pending'?<><button className="mini-action approve" onClick={()=>onReview(row,'Approved')}>Approve</button><button className="mini-action reject" onClick={()=>onReview(row,'Rejected')}>Reject</button>{(canEditEmployees||canCreate)&&<button className="mini-action" onClick={()=>onEdit(row)}>Edit</button>}</>:page==='Employees'?<>{row.status==='pending'&&canApproveEmployees?<><button className="mini-action approve" onClick={()=>onReviewEmployee(row,'active')}>Approve</button><button className="mini-action reject" onClick={()=>onReviewEmployee(row,'rejected')}>Reject</button></>:['active','inactive'].includes(row.status)&&<button className="mini-action" onClick={()=>onToggle(row)}>{row.status==='active'?'Deactivate':'Activate'}</button>}{canAssignRoles&&row.status!=='pending'&&row.role!=='Super Admin'&&<select className="role-select" value={row.role_id} onChange={(ev)=>onAssignRole(row,ev.target.value)}>{roles.filter((r)=>r.name!=='Super Admin').map((r)=><option key={r.id} value={r.id}>{r.name}</option>)}</select>}{(canEditEmployees||canCreate)&&<button className="mini-action" onClick={()=>onEdit(row)}>Edit</button>}</>:null}</td>}
+        {['Applications','Employees'].includes(page)&&<td className="actions-cell">{page==='Applications'&&row.status==='Pending'?<><button className="mini-action approve" onClick={()=>onReview(row,'Approved')}>Approve</button><button className="mini-action reject" onClick={()=>onReview(row,'Rejected')}>Reject</button>{(canEditEmployees||canCreate)&&<button className="mini-action" onClick={()=>onEdit(row)}>Edit</button>}</>:page==='Employees'?<>{row.status==='pending'&&canApproveEmployees?<><button className="mini-action approve" onClick={()=>onReviewEmployee(row,'active')}>Approve</button><button className="mini-action reject" onClick={()=>onReviewEmployee(row,'rejected')}>Reject</button></>:['active','inactive'].includes(row.status)&&<button className="mini-action" onClick={()=>onToggle(row)}>{row.status==='active'?'Deactivate':'Activate'}</button>}{canAssignRoles&&row.status!=='pending'&&row.role!=='Super Admin'&&<select className="role-select" value={row.role_id} onChange={(ev)=>onAssignRole(row,ev.target.value)}>{roles.filter((r)=>r.name!=='Super Admin').map((r)=><option key={r.id} value={r.id}>{r.name}</option>)}</select>}{(canEditEmployees||canCreate)&&<button className="mini-action" onClick={()=>onEdit(row)}>Edit</button>}{user?.role==='Super Admin'&&<button className="mini-action reject" onClick={()=>onResetPassword(row)}>Reset Password</button>}</>:null}</td>}
         {page==='Roles & Permissions'&&<td className="actions-cell">{row.name==='Super Admin'?<span className="muted">Protected</span>:<><button className="mini-action" onClick={()=>onEdit(row)}>Edit</button><button className="mini-action reject" onClick={()=>onDelete(row)}>Delete</button></>}</td>}
         {page==='Projects'&&<td className="actions-cell"><button className="mini-action" onClick={()=>onEdit(row)}>Edit</button></td>}
         {page==='Vendors'&&<td className="actions-cell"><button className="mini-action" onClick={()=>onEdit(row)}>Edit</button></td>}
@@ -549,7 +549,13 @@ function DataPage({ page, items, query, onCreate, onReview, onToggle, onReviewEm
       {!filtered.length&&<EmptyRow colSpan={columns.length+(['Applications','Employees','Projects','Vendors','Announcements','Roles & Permissions','Notifications'].includes(page)?1:0)}/>}
     </tbody></table></div>
     {['Employees','Projects','Vendors','Applications'].includes(page)&&pagination&&<div className="pagination-bar"><span>Showing {pagination.total?((pagination.page-1)*pagination.pageSize)+1:0}–{Math.min(pagination.page*pagination.pageSize,pagination.total)} of {pagination.total} {page.toLowerCase()}</span><label>Rows per page<select value={pagination.pageSize} onChange={(event)=>applyFilters({...filters,page:1,pageSize:Number(event.target.value)})}><option value={10}>10</option><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option></select></label><div><button className="button secondary small" disabled={pagination.page<=1} onClick={()=>applyFilters({...filters,page:pagination.page-1})}>Previous</button><span>Page {pagination.page} of {Math.max(1,pagination.totalPages)}</span><button className="button secondary small" disabled={pagination.page>=pagination.totalPages} onClick={()=>applyFilters({...filters,page:pagination.page+1})}>Next</button></div></div>}
-    {page==='Email Invitations'&&<p className="muted invite-note">Choose a project and employees to send a separate email invitation. An invitation does not submit a project application.</p>}
+    {page==='Email Invitations'&&<div className={`invite-note${emailConfigured===false?' invite-config-notice':''}`} role={emailConfigured===false?'alert':undefined}>
+      {emailConfigured===false
+        ? <><b>Email is not configured.</b> Set {emailMissing?.length?emailMissing.join(', '):'EMAIL_USER, EMAIL_PASSWORD, and EMAIL_FROM'} in the backend environment, then restart the backend.</>
+        : emailConfigured===true
+          ? <><b>Email is ready.</b> Invitations are sent from {emailFrom||'the configured mailbox'}. Choose a project and active employees with email addresses.</>
+          : 'Checking email configuration…'}
+    </div>}
   </Panel>;
 }
 
@@ -716,7 +722,7 @@ function SearchableMultiSelect({ options = [], selected = [], onChange, label, e
   </div>;
 }
 
-function Modal({ type, lookups, record, onClose, onSubmit, busy }) {
+function Modal({ type, lookups, record, onClose, onSubmit, busy, emailConfigured, emailMissing, emailFrom, errorMessage }) {
   const isEdit = Boolean(record && record.id);
   const [values,setValues]=useState(type==='review'?{status:record.status,remarks:''}:type==='role'?{
     name:record.name||'',description:record.description||'',permissions:record.permissions||[],
@@ -739,11 +745,16 @@ function Modal({ type, lookups, record, onClose, onSubmit, busy }) {
   }:type==='announcement'?{
     title:record.title||'',body:record.body||'',priority:record.priority||'Normal',publishAt:record.publish_at?.slice(0,16)||'',
     expiresAt:record.expires_at?.slice(0,16)||'',isPublished:record.is_published===true,targetAll:record.target_all!==false,
+  }:type==='invite'?{
+    projectId:'',employeeIds:[],subject:'Project invitation',message:'Hello,\n\nYou have been invited to join a new annotation project. Please review the details and contact your administrator if you have any questions.\n\nThank you,\nAnnotra AI',
+  }:type==='resetPassword'?{
+    password:'',confirmPassword:'',
   }:{});
+  const [showPassword,setShowPassword]=useState(false);
   const set=(key,value)=>setValues((current)=>({...current,[key]:value}));
   const configs={
     employee:{title: isEdit ? 'Edit Employee' : 'Add New Employee',fields:[['fullName','Full Name'],['email','Email','email'],['mobile','Mobile Number','tel'],['dateOfBirth','Date of Birth','date'],['gender','Gender','select',[['Female','Female'],['Male','Male'],['Non-binary','Non-binary'],['Prefer not to say','Prefer not to say']]],['address','Address','textarea'],['skills','Skills (comma separated)'],['experienceYears','Experience (years)','number'],['highestQualification','Highest Qualification'],['city','City'],['linkedinUrl','LinkedIn URL'],['employeeType','Employee Type'],['roleId','Assigned Role','select',lookups.roles?.map((r)=>[r.id,r.name])],['status','Status','select',[['active','Active'],['inactive','Inactive']]],...(isEdit?[]:[['profilePhoto','Profile Photo','file','image/*'],['resume','Resume','file','.pdf,.doc,.docx'],['idProof','ID Proof','file','.pdf,.jpg,.jpeg,.png']])]},
-    project:{title: isEdit ? 'Edit Project' : 'Add New Project',fields:[['name','Project Name'],['code','Project Code'],['vendorId','Vendor','select',lookups.vendors?.map((v)=>[v.id,v.company_name])],['description','Description','textarea'],['instructions','Project Instructions','textarea'],['requiredSkills','Required Skills (comma separated)'],['requiredAnnotators','Number of Annotators','number'],['startDate','Start Date','date'],['endDate','End Date','date'],['applicationDeadline','Application Deadline','date'],['projectType','Project Type'],['estimatedBudget','Estimated Budget','number'],['status','Project Status','select',[['Draft','Draft'],['Published','Published'],['In Progress','In Progress'],['Completed','Completed'],['On Hold','On Hold'],['Cancelled','Cancelled']]],...(isEdit?[]:[['attachment','Project Attachment','file','.pdf,.doc,.docx,.png,.jpg,.jpeg']])]},
+    project:{title: isEdit ? 'Edit Project' : 'Add New Project',fields:[['name','Project Name'],['code','Project Code'],['vendorId','Vendor (optional)','select',lookups.vendors?.map((v)=>[v.id,v.company_name])],['description','Description','textarea'],['instructions','Project Instructions','textarea'],['requiredSkills','Required Skills (comma separated)'],['requiredAnnotators','Number of Annotators','number'],['startDate','Start Date','date'],['endDate','End Date','date'],['applicationDeadline','Application Deadline','date'],['projectType','Project Type'],['estimatedBudget','Estimated Budget','number'],['status','Project Status','select',[['Draft','Draft'],['Published','Published'],['In Progress','In Progress'],['Completed','Completed'],['On Hold','On Hold'],['Cancelled','Cancelled']]],...(isEdit?[]:[['attachment','Project Attachment','file','.pdf,.doc,.docx,.png,.jpg,.jpeg']])]},
     vendor:{title: isEdit ? 'Edit Vendor' : 'Add New Vendor',fields:[['companyName','Company Name'],['contactPerson','Contact Person'],['email','Email','email'],['mobile','Mobile Number','tel'],['address','Address','textarea'],['companyDetails','Company Details','textarea'],...(isEdit?[['status','Status','select',[['active','Active'],['inactive','Inactive']]]]:[])]},
     announcement:{
       title: isEdit ? 'Edit Announcement' : 'Create Announcement',
@@ -764,6 +775,7 @@ function Modal({ type, lookups, record, onClose, onSubmit, busy }) {
       ],
     },
     invite:{title:'Send Project Invitations',fields:[['projectId','Project','select',lookups.projects?.map((p)=>[p.id,p.name])],['employeeIds','Select Employees','multiselect',lookups.invitationRecipients?.map((employee)=>[employee.id,`${employee.full_name} - ${employee.email}`])],['subject','Email Subject'],['message','Invitation Message','textarea']]},
+    resetPassword:{title:`Reset Password · ${record.full_name||'Employee'}`,fields:[['password','New Password','password'],['confirmPassword','Confirm New Password','password']]},
     review:{title:`${record.status} Application`,fields:[['remarks','Admin Remarks','textarea']]},
     role:{title: isEdit ? 'Edit Role' : 'Create Role',fields:[['name','Role Name'],['description','Description','textarea']]},
     profile:{title:'Update Profile',fields:[['fullName','Full Name'],['email','Email','email'],['dateOfBirth','Date of Birth','date'],['gender','Gender','select',[['Female','Female'],['Male','Male'],['Non-binary','Non-binary'],['Prefer not to say','Prefer not to say']]],['address','Address','textarea'],['skills','Skills (comma separated)'],['experienceYears','Experience (years)','number']]},
@@ -772,11 +784,21 @@ function Modal({ type, lookups, record, onClose, onSubmit, busy }) {
   const handleSubmit=(event)=>{event.preventDefault();onSubmit(values);};
   return <div className="modal-backdrop" onMouseDown={(e)=>{if(e.target===e.currentTarget)onClose();}}><section className={`modal-card ${type==='invite'?'invite-modal':''}`} role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <header><div><span className="modal-icon"><Plus size={17}/></span><h2 id="modal-title">{config.title}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17}/></button></header>
-    <form onSubmit={handleSubmit}><div className="modal-fields">{config.fields.map(([key,label,kind,options])=>kind==='multiselect'
-      ?<div key={key} className="modal-field span-two"><span className="modal-field-label">{label}</span><SearchableMultiSelect options={options||[]} selected={values[key]||[]} onChange={(selected)=>set(key,selected)} label={label} emptyMessage={type==='invite'?'No active employees with email addresses. Add employee emails before sending invitations.':'No active employees available.'}/></div>
-      :<label key={key} className={kind==='textarea'?'span-two':''}>{label}
-        {kind==='textarea'?<textarea rows="3" placeholder={`Enter ${label.toLowerCase()}`} value={values[key]||''} onChange={(e)=>set(key,e.target.value)} required={['fullName','title','body','message'].includes(key)}/>:kind==='select'?<select value={values[key]||''} onChange={(e)=>set(key,e.target.value)} required><option value="">Select {label.toLowerCase()}</option>{options?.map(([value,name])=><option key={value} value={value}>{name}</option>)}</select>:kind==='file'?<input type="file" accept={options} onChange={(e)=>set(key,e.target.files?.[0]||null)}/>:<input type={['date','email','tel','number'].includes(kind)?kind:'text'} placeholder={kind==='date'?undefined:`Enter ${label.toLowerCase()}`} value={values[key]||''} onChange={(e)=>set(key,e.target.value)} required={['fullName','email','mobile','name','code','vendorId','companyName','contactPerson','projectId','subject','roleId'].includes(key)}/>}
-      </label>)}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy||(type==='invite'&&!(values.employeeIds||[]).length)}>{busy?<LoaderCircle className="spin" size={15}/>:type==='invite'?<Send size={15}/>:<Check size={15}/>} {type==='invite'?'Send Invitations':'Save'}</button></div></form>
+    <form onSubmit={handleSubmit}>
+      {errorMessage&&<div className="inline-error modal-inline-error" role="alert">{errorMessage}</div>}
+      {type==='invite'&&<div className={`invite-modal-note${emailConfigured===false?' invite-config-notice':''}`} role={emailConfigured===false?'alert':undefined}>
+        {emailConfigured===false
+          ? <>Email is not configured. Add {emailMissing?.length?emailMissing.join(', '):'EMAIL_USER, EMAIL_PASSWORD, and EMAIL_FROM'} to the backend environment and restart it before sending.</>
+          : <><Send size={14}/> {emailFrom?`Sending from ${emailFrom}. `:''}Select a project and at least one active employee with an email address.</>}
+      </div>}
+      {type==='resetPassword'&&<div className="reset-password-note"><LockKeyhole size={14}/> The password must be 12–128 characters and include lowercase, uppercase, and numeric characters. Other active sessions for this employee will be signed out.</div>}
+      <div className="modal-fields">{config.fields.map(([key,label,kind,options])=>kind==='multiselect'
+        ?<div key={key} className="modal-field span-two"><span className="modal-field-label">{label}</span><SearchableMultiSelect options={options||[]} selected={values[key]||[]} onChange={(selected)=>set(key,selected)} label={label} emptyMessage={type==='invite'?'No active employees with email addresses. Add employee emails before sending invitations.':'No active employees available.'}/></div>
+        :kind==='password'
+          ?<label key={key} className="span-two">{label}<div className="password-input"><input type={showPassword?'text':'password'} autoComplete="new-password" minLength={12} maxLength={128} placeholder="Enter a strong password" value={values[key]||''} onChange={(e)=>set(key,e.target.value)} required/><button type="button" onClick={()=>setShowPassword((visible)=>!visible)} aria-label={showPassword?'Hide password':'Show password'}>{showPassword?<EyeOff size={15}/>:<Eye size={15}/>}</button></div></label>
+          :<label key={key} className={kind==='textarea'?'span-two':''}>{label}
+            {kind==='textarea'?<textarea rows="4" placeholder={`Enter ${label.toLowerCase()}`} value={values[key]||''} onChange={(e)=>set(key,e.target.value)} required={['fullName','title','body','message'].includes(key)}/>:kind==='select'?<select value={values[key]||''} onChange={(e)=>set(key,e.target.value)} required={key!=='vendorId'}><option value="">{key==='vendorId'?'No vendor':'Select '+label.toLowerCase()}</option>{options?.map(([value,name])=><option key={value} value={value}>{name}</option>)}</select>:kind==='file'?<input type="file" accept={options} onChange={(e)=>set(key,e.target.files?.[0]||null)}/>:<input type={['date','email','tel','number'].includes(kind)?kind:'text'} placeholder={kind==='date'?undefined:`Enter ${label.toLowerCase()}`} value={values[key]||''} onChange={(e)=>set(key,e.target.value)} required={['fullName','email','mobile','name','code','companyName','contactPerson','projectId','subject','roleId','password','confirmPassword'].includes(key)}/>}
+          </label>)}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy||(type==='invite'&&(emailConfigured!==true||!(values.employeeIds||[]).length))}>{busy?<LoaderCircle className="spin" size={15}/>:type==='invite'?<Send size={15}/>:<Check size={15}/>} {type==='invite'?'Send Invitations':type==='resetPassword'?'Update Password':'Save'}</button></div></form>
   </section></div>;
 }
 
@@ -795,6 +817,7 @@ export default function App() {
   const [listFilters,setListFilters]=useState(initialListFilters);
   const [listPagination,setListPagination]=useState({page:1,pageSize:25,total:0,totalPages:0});
   const [settings,setSettings]=useState({workspaceName:'Annotra AI',supportEmail:'annotrai.help@gmail.com'});
+  const [emailConfig,setEmailConfig]=useState({configured:null,missing:[],from:''});
   const [preferences,setPreferences]=useState({compactMode:false,hideWelcome:false});
   const [query,setQuery]=useState('');
   const [error,setError]=useState('');
@@ -872,9 +895,14 @@ export default function App() {
         if(page==='Reports')setItems([await api('/reports/summary').then((r)=>r.data)]);
         else setItems([]);
       } else if(page==='Email Invitations'){
-        const [result,lookup]=await Promise.all([api('/invitations'),api('/lookups')]);
+        const [result,lookup,configResult]=await Promise.all([
+          api('/invitations'),
+          api('/lookups'),
+          api('/invitations/config').catch(()=>({data:{configured:false,missing:['a redeployed backend'],from:''}})),
+        ]);
         setItems(result.data);
         setLookups((previous)=>({...previous,...lookup}));
+        setEmailConfig(configResult.data);
       } else if(page==='Employees'){
         const params=new URLSearchParams();
         for(const [key,value] of Object.entries(employeeFilters))if(value!==''&&value!==null&&value!==undefined)params.set(key,String(value));
@@ -952,6 +980,10 @@ export default function App() {
       if(body.targetAll!==undefined)body.targetAll=body.targetAll==='true';
       if(modal.type==='review') {
         await api(`/applications/${modal.record.id}`,{method:'PATCH',body:JSON.stringify({status:modal.status,remarks:body.remarks})});
+      } else if(modal.type==='resetPassword') {
+        if(body.password!==body.confirmPassword)throw new Error('Passwords do not match.');
+        await api(`/employees/${modal.record.id}/password`,{method:'PATCH',body:JSON.stringify({password:body.password,confirmPassword:body.confirmPassword})});
+        completionMessage='Password updated. Other active sessions for this employee have been signed out.';
       } else if(modal.type==='invite') {
         body.employeeIds=Array.isArray(body.employeeIds)?body.employeeIds:body.employeeIds.split(',').map((item)=>item.trim()).filter(Boolean);
         const result=await api('/invitations',{method:'POST',body:JSON.stringify(body)});
@@ -1014,7 +1046,12 @@ export default function App() {
       setModal(null);await refresh();
       if(invitationFailures)setError(completionMessage);
       else notify(completionMessage);
-    } catch(e){setError(e.message);}
+    } catch(e){
+      const message=e.message==='API route not found.'
+        ? 'This feature is not deployed on the backend yet. Redeploy the backend, then try again.'
+        : e.message;
+      setError(message);
+    }
     finally{setBusy(false);}
   }
   async function saveRolePermissions(role,permissionCodes) {
@@ -1118,13 +1155,13 @@ export default function App() {
           :page==='Reports'?<Panel title="Reports overview"><div className="stats-grid report-stats">{items[0]&&Object.entries(items[0]).map(([key,value])=><StatCard key={key} title={key.replaceAll('_',' ')} value={value} tone="blue" icon={BarChart3}/>)}</div></Panel>
           :page==='My Profile'?<Panel title="My Profile" action={{label:'Edit Profile',onClick:()=>setModal({type:'profile',record:items[0]||{}})}}><div className="profile-card">{items[0]?.profile_photo_url?<img className="avatar profile-avatar" src={items[0].profile_photo_url} alt="Profile"/>:<span className="avatar profile-avatar">{user.name?.split(' ').map((part)=>part[0]).slice(0,2).join('')}</span>}<div><h2>{user.name}</h2><p>{user.role} · {user.mobile}</p><StatusBadge value={items[0]?.status||'Active'}/><small className="profile-email">{items[0]?.email}</small></div></div><div className="profile-documents">{[['profile-photo','Profile Photo','image/*',items[0]?.profile_photo_url],['resume','Resume','application/pdf,.doc,.docx',items[0]?.resume_url],['id-proof','ID Proof','application/pdf,.jpg,.jpeg,.png',items[0]?.id_proof_url]].map(([kind,label,accept,url])=>{const document=items[0]?.documents?.find((item)=>item.document_type===kind);return <label key={kind}><span><b>{label}</b><small>{url?<a href={url} target="_blank" rel="noreferrer">View current file</a>:'Not uploaded'}</small></span><div className="profile-file-actions"><input type="file" accept={accept} onChange={(event)=>uploadOwnDocument(kind,event.target.files?.[0])}/>{document&&<button type="button" className="mini-action reject" onClick={()=>deleteOwnDocument(document.id)}>Delete</button>}</div></label>})}</div></Panel>
           :page==='Roles & Permissions'?<RolePermissionsPage roles={items} permissions={lookups.permissions||[]} currentUser={user} onCreate={()=>setModal({type:'role'})} onSave={saveRolePermissions} busy={busy}/>
-          :<>{['My Projects','Available Projects','My Applications'].includes(page)?<Panel title={page}><div className="available-list standalone">{items.filter((item)=>JSON.stringify(item).toLowerCase().includes(query.toLowerCase())).map((project)=><article className="available-item" key={project.id}><div className="project-symbol"><FolderClosed size={18}/></div><div className="project-details"><b>{project.name||project.project}</b><span>{project.vendor||`Applied ${fmtDate(project.applied_at)}`}</span><div className="skill-tags">{(project.required_skills||[]).map((tag)=><i key={tag}>{tag}</i>)}</div></div>{page==='Available Projects'?<button className={`button small ${project.applied?'applied-button':'primary'}`} disabled={project.applied||applyingProjectId===project.id} onClick={()=>apply(project.id)}>{project.applied?'Applied':applyingProjectId===project.id?'Applying…':'Apply'}</button>:project.status?<StatusBadge value={project.status}/>:null}</article>)}{!items.length&&<div className="empty-state"><span><IconForPage page={page}/></span><b>Nothing here yet</b><p>No real project records are available for this view yet.</p></div>}</div></Panel>:<DataPage page={page} items={items} query={query} filters={page==='Employees'?employeeFilters:listFilters} pagination={page==='Employees'?employeePagination:['Projects','Vendors','Applications'].includes(page)?listPagination:null} onApplyEmployeeFilters={applyEmployeeFilters} onApplyFilters={applyListFilters} employeeTypes={lookups.employeeTypes||[]} canCreate={createAllowed} canApproveEmployees={user.permissions?.includes('employees.approve')} canAssignRoles={user.permissions?.includes('employees.assign_role')} canEditEmployees={user.permissions?.includes('employees.edit')||user.role==='Super Admin'} user={user} roles={lookups.roles||[]} vendors={lookups.vendors||[]} onCreate={pageAction()} onReview={reviewApplication} onReviewEmployee={reviewEmployee} onAssignRole={assignEmployeeRole} onToggle={toggleEmployee} onEdit={(record)=>{if(page==='Roles & Permissions')setModal({type:'role',record});else if(page==='Employees')setModal({type:'employee',record});else if(page==='Projects')setModal({type:'project',record});else if(page==='Vendors')setModal({type:'vendor',record});else if(page==='Announcements')setModal({type:'announcement',record});}} onDelete={deleteRole}/>}</>}
+          :<>{['My Projects','Available Projects','My Applications'].includes(page)?<Panel title={page}><div className="available-list standalone">{items.filter((item)=>JSON.stringify(item).toLowerCase().includes(query.toLowerCase())).map((project)=><article className="available-item" key={project.id}><div className="project-symbol"><FolderClosed size={18}/></div><div className="project-details"><b>{project.name||project.project}</b><span>{project.vendor||`Applied ${fmtDate(project.applied_at)}`}</span><div className="skill-tags">{(project.required_skills||[]).map((tag)=><i key={tag}>{tag}</i>)}</div></div>{page==='Available Projects'?<button className={`button small ${project.applied?'applied-button':'primary'}`} disabled={project.applied||applyingProjectId===project.id} onClick={()=>apply(project.id)}>{project.applied?'Applied':applyingProjectId===project.id?'Applying…':'Apply'}</button>:project.status?<StatusBadge value={project.status}/>:null}</article>)}{!items.length&&<div className="empty-state"><span><IconForPage page={page}/></span><b>Nothing here yet</b><p>No real project records are available for this view yet.</p></div>}</div></Panel>:<DataPage page={page} items={items} query={query} filters={page==='Employees'?employeeFilters:listFilters} pagination={page==='Employees'?employeePagination:['Projects','Vendors','Applications'].includes(page)?listPagination:null} onApplyEmployeeFilters={applyEmployeeFilters} onApplyFilters={applyListFilters} employeeTypes={lookups.employeeTypes||[]} canCreate={createAllowed} canApproveEmployees={user.permissions?.includes('employees.approve')} canAssignRoles={user.permissions?.includes('employees.assign_role')} canEditEmployees={user.permissions?.includes('employees.edit')||user.role==='Super Admin'} user={user} roles={lookups.roles||[]} vendors={lookups.vendors||[]} onCreate={pageAction()} onReview={reviewApplication} onReviewEmployee={reviewEmployee} onAssignRole={assignEmployeeRole} onToggle={toggleEmployee} onResetPassword={(record)=>setModal({type:'resetPassword',record})} onEdit={(record)=>{if(page==='Roles & Permissions')setModal({type:'role',record});else if(page==='Employees')setModal({type:'employee',record});else if(page==='Projects')setModal({type:'project',record});else if(page==='Vendors')setModal({type:'vendor',record});else if(page==='Announcements')setModal({type:'announcement',record});}} onDelete={deleteRole} emailConfigured={emailConfig.configured} emailMissing={emailConfig.missing} emailFrom={emailConfig.from}/>}</>}
         </>}
       </main>
     </div>
     {collapsed&&<button className="mobile-scrim" onClick={()=>setCollapsed(false)} aria-label="Close sidebar"/>}
     {toast&&<div className="toast"><CircleCheckBig size={16}/>{toast}</div>}
-    {modal&&<Modal type={modal.type} lookups={lookups} record={modal.record||{}} onClose={()=>setModal(null)} onSubmit={submitModal} busy={busy}/>}
+    {modal&&<Modal type={modal.type} lookups={lookups} record={modal.record||{}} onClose={()=>setModal(null)} onSubmit={submitModal} busy={busy} emailConfigured={emailConfig.configured} emailMissing={emailConfig.missing} emailFrom={emailConfig.from} errorMessage={error}/>}
   </div>;
 }
 

@@ -15,15 +15,57 @@ const databaseSslRejectUnauthorized = process.env.DB_SSL_REJECT_UNAUTHORIZED !==
 const databaseSslCa = databaseSslCaPath
   ? readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', databaseSslCaPath), 'utf8')
   : undefined;
+function databaseConnectionString() {
+  const value = process.env.DATABASE_URL;
+  if (!value || envValue('DB_FORCE_SESSION_POOLER') === 'true') return value;
+  try {
+    const url = new URL(value);
+    if (url.hostname.endsWith('.pooler.supabase.com') && (!url.port || url.port === '5432')) {
+      url.port = '6543';
+      return url.toString();
+    }
+  } catch {
+    return value;
+  }
+  return value;
+}
+const connectionString = databaseConnectionString();
+const databaseHost = process.env.DB_HOST || 'localhost';
+const forceSessionPooler = envValue('DB_FORCE_SESSION_POOLER') === 'true';
+const useTransactionPooler = !forceSessionPooler
+  && databaseHost.endsWith('.pooler.supabase.com')
+  && (!process.env.DB_PORT || process.env.DB_PORT.trim() === '5432');
+const databasePort = useTransactionPooler ? 6543 : Number(process.env.DB_PORT || 5432);
+const emailUser = envValue('EMAIL_USER');
+const emailPassword = envValue('EMAIL_PASSWORD');
+const emailHost = envValue('EMAIL_HOST', 'smtp.gmail.com');
+const emailPort = Number(envValue('EMAIL_PORT', '587'));
+const emailFrom = envValue('EMAIL_FROM') || emailUser;
+const emailMissing = [
+  !emailHost && 'EMAIL_HOST',
+  !Number.isInteger(emailPort) || emailPort <= 0 ? 'EMAIL_PORT' : '',
+  !emailUser && 'EMAIL_USER',
+  !emailPassword && 'EMAIL_PASSWORD',
+  !emailFrom && 'EMAIL_FROM',
+].filter(Boolean);
+const emailConfig = {
+  host: emailHost,
+  port: emailPort,
+  user: emailUser,
+  password: emailPassword,
+  from: emailFrom,
+  missing: emailMissing,
+  configured: emailMissing.length === 0,
+};
 
 export const config = {
   port: Number(process.env.PORT || 3001),
   nodeEnv: process.env.NODE_ENV || 'development',
   frontendUrl,
   database: {
-    connectionString: process.env.DATABASE_URL,
-    host: process.env.DATABASE_URL ? undefined : process.env.DB_HOST || 'localhost',
-    port: process.env.DATABASE_URL ? undefined : Number(process.env.DB_PORT || 5432),
+    connectionString,
+    host: process.env.DATABASE_URL ? undefined : databaseHost,
+    port: process.env.DATABASE_URL ? undefined : databasePort,
     database: process.env.DATABASE_URL ? undefined : process.env.DB_NAME || 'projectflow',
     user: process.env.DATABASE_URL ? undefined : process.env.DB_USER || 'postgres',
     password: process.env.DATABASE_URL ? undefined : process.env.DB_PASSWORD || 'postgres',
@@ -51,13 +93,7 @@ export const config = {
     cdnUrl: envValue('BUNNY_CDN_URL') || envValue('BUNNY_CDN_HOSTNAME'),
     region: process.env.BUNNY_STORAGE_REGION || '',
   },
-  email: {
-    host: envValue('EMAIL_HOST', 'smtp.gmail.com'),
-    port: Number(envValue('EMAIL_PORT', '587')),
-    user: envValue('EMAIL_USER'),
-    password: envValue('EMAIL_PASSWORD'),
-    from: envValue('EMAIL_FROM') || envValue('EMAIL_USER'),
-  },
+  email: emailConfig,
   privateFileDirectory: process.env.PRIVATE_FILE_DIRECTORY || '',
   privateFileMaxBytes: Number.isSafeInteger(requestedPrivateFileMaxBytes) && requestedPrivateFileMaxBytes > 0
     ? Math.min(5 * 1024 * 1024, requestedPrivateFileMaxBytes)

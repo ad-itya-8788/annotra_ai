@@ -18,6 +18,7 @@ router.use(requireCsrf);
 const otpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 3, standardHeaders: true, legacyHeaders: false });
 const verifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false });
 const passwordLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false });
+const passwordResetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false });
 const registrationLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   limit: 5,
@@ -546,9 +547,9 @@ router.get('/dashboard', permission('dashboard.view'), asyncRoute(async (req, re
         [user.id],
       ),
       pool.query(
-        `SELECT p.id,p.name,p.description,p.required_skills,p.project_type,p.application_deadline,v.company_name AS vendor,
+        `SELECT p.id,p.name,p.description,p.required_skills,p.project_type,p.application_deadline,COALESCE(v.company_name,'No vendor assigned') AS vendor,
           EXISTS(SELECT 1 FROM project_applications a WHERE a.project_id=p.id AND a.employee_id=$1) AS applied
-         FROM projects p JOIN vendors v ON v.id=p.vendor_id
+         FROM projects p LEFT JOIN vendors v ON v.id=p.vendor_id
          WHERE p.status='Published' AND (p.application_deadline IS NULL OR p.application_deadline>=CURRENT_DATE)
          ORDER BY p.application_deadline NULLS LAST LIMIT 6`,
         [user.id],
@@ -580,9 +581,9 @@ router.get('/dashboard', permission('dashboard.view'), asyncRoute(async (req, re
   if (['Team Lead','Reviewer'].includes(user.role)) {
     const [{ rows: projects }, { rows: announcements }] = await Promise.all([
       pool.query(
-        `SELECT p.id,p.name,p.status,p.application_deadline,v.company_name AS vendor
+        `SELECT p.id,p.name,p.status,p.application_deadline,COALESCE(v.company_name,'No vendor assigned') AS vendor
          FROM project_assignments pa JOIN projects p ON p.id=pa.project_id
-         JOIN vendors v ON v.id=p.vendor_id WHERE pa.employee_id=$1
+         LEFT JOIN vendors v ON v.id=p.vendor_id WHERE pa.employee_id=$1
          ORDER BY p.updated_at DESC LIMIT 50`,
         [user.id],
       ),
@@ -613,9 +614,9 @@ router.get('/dashboard', permission('dashboard.view'), asyncRoute(async (req, re
         (SELECT COUNT(*)::int FROM project_applications) AS applications`,
     ),
     pool.query(
-      `SELECT p.id,p.name,v.company_name AS vendor,p.status,p.application_deadline,
+      `SELECT p.id,p.name,COALESCE(v.company_name,'No vendor assigned') AS vendor,p.status,p.application_deadline,
         LEAST(100,GREATEST(0,COALESCE((SELECT COUNT(*)*100/p.required_annotators FROM project_assignments pa WHERE pa.project_id=p.id),0)))::int AS progress
-       FROM projects p JOIN vendors v ON v.id=p.vendor_id ORDER BY p.created_at DESC LIMIT 5`,
+       FROM projects p LEFT JOIN vendors v ON v.id=p.vendor_id ORDER BY p.created_at DESC LIMIT 5`,
     ),
     pool.query(
       `SELECT a.id,e.full_name AS employee,p.name AS project,a.applied_at,a.status
@@ -658,19 +659,19 @@ router.get('/projects', permission('projects.view'), asyncRoute(async (req, res)
        OR ($5::boolean=FALSE AND $1::boolean=FALSE AND $4::boolean=FALSE
          AND ((p.status='Published' AND (p.application_deadline IS NULL OR p.application_deadline>=CURRENT_DATE))
            OR EXISTS(SELECT 1 FROM project_applications a WHERE a.project_id=p.id AND a.employee_id=$3))))
-       AND ($2::text IS NULL OR p.name ILIKE $2 OR p.code ILIKE $2 OR v.company_name ILIKE $2)
+       AND ($2::text IS NULL OR p.name ILIKE $2 OR p.code ILIKE $2 OR COALESCE(v.company_name,'') ILIKE $2)
        AND ($6::text IS NULL OR p.status=$6)
        AND ($7::uuid IS NULL OR p.vendor_id=$7)
        AND ($8::date IS NULL OR p.start_date >= $8::date)
        AND ($9::date IS NULL OR p.start_date <= $9::date)`;
   const [{ rows }, { rows: countRows }] = await Promise.all([
     pool.query(
-    `SELECT p.*,v.company_name AS vendor,
+    `SELECT p.*,COALESCE(v.company_name,'No vendor assigned') AS vendor,
       EXISTS(SELECT 1 FROM project_applications a WHERE a.project_id=p.id AND a.employee_id=$3) AS applied
-     FROM projects p JOIN vendors v ON v.id=p.vendor_id ${where}
+     FROM projects p LEFT JOIN vendors v ON v.id=p.vendor_id ${where}
      ORDER BY ${sortColumn} ${sortDirection},p.id ASC LIMIT $10 OFFSET $11`,
     [...values,pageSize,(page-1)*pageSize]),
-    pool.query(`SELECT COUNT(*)::int AS total FROM projects p JOIN vendors v ON v.id=p.vendor_id ${where}`,values),
+    pool.query(`SELECT COUNT(*)::int AS total FROM projects p LEFT JOIN vendors v ON v.id=p.vendor_id ${where}`,values),
   ]);
   const total=countRows[0].total;
   res.json({ data: rows, pagination:{page,pageSize,total,totalPages:Math.ceil(total/pageSize)} });
@@ -679,12 +680,21 @@ router.get('/projects', permission('projects.view'), asyncRoute(async (req, res)
 router.post('/projects', permission('projects.create'), asyncRoute(async (req, res) => {
   const body = req.body;
   const status=body.status||'Draft';
+  const vendorId = body.vendorId === undefined || body.vendorId === null || body.vendorId === ''
+    ? null
+    : text(body.vendorId, 50);
+  if (body.vendorId !== undefined && body.vendorId !== null && body.vendorId !== '' && !vendorId) {
+    return res.status(400).json({ error: 'Select a valid vendor.' });
+  }
+  if (vendorId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(vendorId)) {
+    return res.status(400).json({ error: 'Select a valid vendor.' });
+  }
   if(!['Draft','Published','In Progress','Completed','On Hold','Cancelled'].includes(status))return res.status(400).json({error:'Invalid project status.'});
   if(status==='Published'&&!await hasPermission(req.session.user,'projects.publish'))return res.status(403).json({error:'You do not have permission to publish projects.'});
   const { rows } = await pool.query(
     `INSERT INTO projects (name,code,vendor_id,description,instructions,required_skills,required_annotators,start_date,end_date,application_deadline,project_type,estimated_budget,status)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-    [required(body.name, 'Project name'),required(body.code, 'Project code'),required(body.vendorId, 'Vendor'),text(body.description),text(body.instructions),csvArray(body.requiredSkills),Math.max(1,Number(body.requiredAnnotators)||1),body.startDate||null,body.endDate||null,body.applicationDeadline||null,text(body.projectType,100)||'Annotation',body.estimatedBudget||null,status],
+    [required(body.name, 'Project name'),required(body.code, 'Project code'),vendorId,text(body.description),text(body.instructions),csvArray(body.requiredSkills),Math.max(1,Number(body.requiredAnnotators)||1),body.startDate||null,body.endDate||null,body.applicationDeadline||null,text(body.projectType,100)||'Annotation',body.estimatedBudget||null,status],
   );
   res.status(201).json({ data: rows[0] });
 }));
@@ -888,6 +898,43 @@ router.patch('/employees/:id/role', permission('employees.assign_role'), asyncRo
   res.json({ message: 'Employee role updated.' });
 }));
 
+router.patch('/employees/:id/password', requireAuth, passwordResetLimiter, asyncRoute(async (req, res) => {
+  if (req.session.user.role !== 'Super Admin') {
+    return res.status(403).json({ error: 'Only a Super Admin can reset employee passwords.' });
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    return res.status(400).json({ error: 'Employee ID is invalid.' });
+  }
+  const password = String(req.body.password || '');
+  if (password.length < 12 || password.length > 128 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
+    return res.status(400).json({ error: 'Password must be 12–128 characters and include lowercase, uppercase, and numeric characters.' });
+  }
+  if (String(req.body.confirmPassword || '') !== password) {
+    return res.status(400).json({ error: 'Passwords do not match.' });
+  }
+  const passwordHash = await hashPassword(password);
+  const updated = await inTransaction(async (client) => {
+    const { rows } = await client.query(
+      'UPDATE employees SET password_hash=$2,updated_at=NOW() WHERE id=$1 RETURNING id',
+      [req.params.id, passwordHash],
+    );
+    if (!rows[0]) return false;
+    await client.query(
+      `DELETE FROM auth_sessions
+       WHERE sess->'user'->>'id'=$1 AND sid<>$2`,
+      [req.params.id, req.sessionID],
+    );
+    await client.query(
+      `INSERT INTO audit_logs (actor_employee_id,action,target_employee_id)
+       VALUES ($1,'employee.password_reset',$2)`,
+      [req.session.user.id, req.params.id],
+    );
+    return true;
+  });
+  if (!updated) return res.status(404).json({ error: 'Employee not found.' });
+  res.json({ message: 'Password updated. Other active sessions have been signed out.' });
+}));
+
 router.get('/audit-logs', permission('audit.view'), asyncRoute(async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT a.id,a.action,a.details,a.created_at,
@@ -1068,10 +1115,10 @@ router.get('/applications', permission('applications.view'), asyncRoute(async (r
 router.get('/my-applications', requireAuth, asyncRoute(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT a.id,a.project_id,a.status,a.remarks,a.applied_at,
-       p.name AS project,v.company_name AS vendor,p.required_skills
+       p.name AS project,COALESCE(v.company_name,'No vendor assigned') AS vendor,p.required_skills
      FROM project_applications a
      JOIN projects p ON p.id=a.project_id
-     JOIN vendors v ON v.id=p.vendor_id
+     LEFT JOIN vendors v ON v.id=p.vendor_id
      WHERE a.employee_id=$1
      ORDER BY a.applied_at DESC
      LIMIT 100`,
@@ -1271,7 +1318,10 @@ router.get('/lookups', requireAuth, asyncRoute(async (req,res)=>{
     invitationRecipients=inviteEmployees;
     projects=availableProjects;
   }
-  res.json({vendors,roles,permissions,employeeTypes:employeeTypes.map(({name})=>name),employees,invitationRecipients,projects});
+  res.json({
+    vendors,roles,permissions,employeeTypes:employeeTypes.map(({name})=>name),employees,invitationRecipients,projects,
+    emailConfigured:canInvite&&Boolean(config.email.user&&config.email.password&&config.email.from),
+  });
 }));
 
 router.post('/upload/resume', requireAuth, resumeUpload.single('file'), asyncRoute(async(req,res)=>{
@@ -1381,13 +1431,24 @@ router.delete('/project-attachments/:id', permission('projects.edit'), asyncRout
   res.status(204).end();
 }));
 
+router.get('/invitations/config', permission('invitations.send'), (_req,res)=>res.json({data:{
+  configured:config.email.configured,
+  missing:config.email.missing,
+  host:config.email.host,
+  port:config.email.port,
+  from:config.email.from,
+}}));
+
 router.post('/invitations', permission('invitations.send'), asyncRoute(async (req,res)=>{
   const {projectId,employeeIds,subject,message}=req.body;
   if(!Array.isArray(employeeIds)||!employeeIds.length||employeeIds.length>100)return res.status(400).json({error:'Select between 1 and 100 employees.'});
   const emailSubject=required(subject,'Email subject');
   const emailMessage=required(message,'Invitation message');
-  if(!config.email.host||!config.email.port||!config.email.user||!config.email.password||!config.email.from) {
-    return res.status(503).json({error:'Email is not configured. Set EMAIL_USER, EMAIL_PASSWORD, and EMAIL_FROM in the backend environment.'});
+  if(!config.email.configured) {
+    return res.status(503).json({
+      error:`Email sending is not configured. Add ${config.email.missing.join(', ')} to the backend environment, then restart the backend.`,
+      missing:config.email.missing,
+    });
   }
   const {rows:projectRows}=await pool.query('SELECT name FROM projects WHERE id=$1',[projectId]);
   if(!projectRows[0])return res.status(404).json({error:'Project not found.'});
@@ -1432,12 +1493,21 @@ router.get('/reports/summary', permission('reports.view'), asyncRoute(async (_re
   res.json({data:rows[0]});
 }));
 
+const transientDatabaseCodes = new Set([
+  '08000','08001','08003','08006','08007','08201','53300','57P01','57P02','57P03',
+  'ECONNRESET','ECONNREFUSED','ETIMEDOUT','ENOTFOUND','EAI_AGAIN',
+]);
+
 router.use((error,req,res,_next)=>{
   if(error instanceof multer.MulterError)return res.status(error.code==='LIMIT_FILE_SIZE'?413:400).json({error:error.code==='LIMIT_FILE_SIZE'?(req.path.startsWith('/auth/register/')?'File must be no larger than 5 MB.':req.path.startsWith('/public/forms/')?'File must be no larger than 4 MB.':'File must be no larger than 10 MB.'):error.message});
   if(error.code==='23505')return res.status(409).json({error:'A record with the same unique value already exists.'});
   if(error.code==='23503'||error.code==='23514')return res.status(400).json({error:'One or more supplied values are not valid for this record.'});
   const status=Number(error.status)||500;
   if(status>=500)console.error(error);
+  const databaseUnavailable = (!error.status || status>=500)
+    && (transientDatabaseCodes.has(String(error.code))
+      || /connection terminated|connection timeout|timeout expired|max clients reached|too many clients|remaining connection slots|connection limit/i.test(error.message||''));
+  if(databaseUnavailable)return res.status(503).json({error:'Database is temporarily unavailable. Please try again.'});
   const message=error.publicMessage?error.message:status>=500&&status!==503?'The request could not be completed.':error.message;
   res.status(status).json({error:message});
 });

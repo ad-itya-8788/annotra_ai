@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Megaphone, Bell, BriefcaseBusiness, CalendarDays, Check, ChevronDown, ChevronRight, FilePlus2,
   CircleHelp, ClipboardList, Clock3, FileText, FolderClosed, Globe2, Headphones, House,
@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { api, setCsrfToken } from './api.js';
 import { FormsPage, PublicFormPage } from './Forms.jsx';
+import EmailStudioPage, { readLocalTemplates } from './EmailStudio.jsx';
 import { updatePageMetadata } from './seo.js';
 import LandingPage from './LandingPage.jsx';
 
@@ -818,6 +819,8 @@ export default function App() {
   const [listPagination,setListPagination]=useState({page:1,pageSize:25,total:0,totalPages:0});
   const [settings,setSettings]=useState({workspaceName:'Annotra AI',supportEmail:'annotrai.help@gmail.com'});
   const [emailConfig,setEmailConfig]=useState({configured:null,missing:[],from:''});
+  const [emailTemplates,setEmailTemplates]=useState([]);
+  const [templatesSupported,setTemplatesSupported]=useState(true);
   const [preferences,setPreferences]=useState({compactMode:false,hideWelcome:false});
   const [query,setQuery]=useState('');
   const [error,setError]=useState('');
@@ -827,12 +830,23 @@ export default function App() {
   const [applyingProjectId,setApplyingProjectId]=useState(null);
   const [dismissed,setDismissed]=useState(false);
   const [collapsed,setCollapsed]=useState(false);
+  const [listLoading,setListLoading]=useState(false);
+  const toastTimer=useRef(null);
+  const refreshId=useRef(0);
   const employee=user?.role==='Annotator';
 
   useEffect(()=>{
     if(publicFormSlug){setInitializing(false);return;}
     api('/auth/session').then((result)=>{setUser(result.user);setCsrf(result.csrfToken);setCsrfToken(result.csrfToken);}).catch((e)=>setError(e.message)).finally(()=>setInitializing(false));
   },[publicFormSlug]);
+  useEffect(()=>{
+    const onSessionExpired=()=>{
+      setUser(null);setData(null);setItems([]);setCsrf(null);setCsrfToken(null);setModal(null);setShowLogin(true);
+      setError('Your session expired. Please sign in again.');
+    };
+    window.addEventListener('projectflow:session-expired',onSessionExpired);
+    return()=>window.removeEventListener('projectflow:session-expired',onSessionExpired);
+  },[]);
   useEffect(()=>{
     if(publicFormSlug)return;
     const landing=window.location.pathname==='/'&&!showLogin&&!user;
@@ -858,7 +872,11 @@ export default function App() {
       .catch((e)=>{if(active)setError(e.message);});
     return()=>{active=false;};
   },[user]);
-  const notify=useCallback((message)=>{setToast(message);window.setTimeout(()=>setToast(''),3500);},[]);
+  const notify=useCallback((message)=>{
+    setToast(message);
+    if(toastTimer.current)window.clearTimeout(toastTimer.current);
+    toastTimer.current=window.setTimeout(()=>setToast(''),3500);
+  },[]);
   const navigate=useCallback((next,{replace=false}={})=>{
     const path=next==='Dashboard'?'/':`/${routeSlug(next)}`;
     const currentPage=pageFromPath(window.location.pathname);
@@ -877,7 +895,8 @@ export default function App() {
   },[]);
   const refresh=useCallback(async()=>{
     if(!user)return;
-    setError('');
+    const requestId=++refreshId.current;
+    setError('');setListLoading(true);
     try {
       if(page==='Dashboard')setData(await api('/dashboard'));
       else if(page==='My Projects')setItems((await api('/projects?assigned=true')).data);
@@ -895,14 +914,20 @@ export default function App() {
         if(page==='Reports')setItems([await api('/reports/summary').then((r)=>r.data)]);
         else setItems([]);
       } else if(page==='Email Invitations'){
-        const [result,lookup,configResult]=await Promise.all([
+        const [result,lookup,configResult,templateResult]=await Promise.all([
           api('/invitations'),
           api('/lookups'),
           api('/invitations/config').catch(()=>({data:{configured:false,missing:['a redeployed backend'],from:''}})),
+          api('/email-templates').then((result)=>({data:result.data||[],supported:true})).catch(()=>({
+            data:readLocalTemplates(),
+            supported:false,
+          })),
         ]);
         setItems(result.data);
         setLookups((previous)=>({...previous,...lookup}));
         setEmailConfig(configResult.data);
+        setEmailTemplates(templateResult.data||[]);
+        setTemplatesSupported(templateResult.supported);
       } else if(page==='Employees'){
         const params=new URLSearchParams();
         for(const [key,value] of Object.entries(employeeFilters))if(value!==''&&value!==null&&value!==undefined)params.set(key,String(value));
@@ -922,7 +947,8 @@ export default function App() {
         const result=await api('/lookups');
         setLookups((previous)=>({...previous,...result}));
       }
-    } catch(e){setError(e.message);}
+    } catch(e){if(requestId===refreshId.current&&!e.stale)setError(e.message);}
+    finally{if(requestId===refreshId.current)setListLoading(false);}
   },[user,page,employeeFilters,listFilters]);
   const applyEmployeeFilters=useCallback((nextFilters)=>{
     const next={...nextFilters,pageSize:Number(nextFilters.pageSize)||25,page:Number(nextFilters.page)||1};
@@ -1124,6 +1150,26 @@ export default function App() {
     catch(e){setError(e.message);}
     finally{setApplyingProjectId(null);}
   }
+  async function uploadOwnDocument(kind,file) {
+    if(!file)return;
+    setBusy(true);setError('');
+    try {
+      const body=new FormData();
+      body.append('file',file);
+      body.append('employeeId',user.id);
+      await api(`/upload/${kind}`,{method:'POST',body});
+      notify('Document uploaded.');
+      await refresh();
+    } catch(e){setError(e.message);}
+    finally{setBusy(false);}
+  }
+  async function deleteOwnDocument(documentId) {
+    if(!window.confirm('Delete this document?'))return;
+    setBusy(true);setError('');
+    try {await api(`/employee-documents/${documentId}`,{method:'DELETE'});notify('Document deleted.');await refresh();}
+    catch(e){setError(e.message);}
+    finally{setBusy(false);}
+  }
   async function logout() {
     try{await api('/auth/logout',{method:'POST'});}catch(e){setError(e.message);return;}
     setUser(null);setData(null);setItems([]);setCsrf(null);setCsrfToken(null);navigate('Dashboard',{replace:true});
@@ -1133,7 +1179,6 @@ export default function App() {
     if(page==='Projects')return()=>setModal({type:'project'});
     if(page==='Vendors')return()=>setModal({type:'vendor'});
     if(page==='Announcements')return()=>setModal({type:'announcement'});
-    if(page==='Email Invitations')return()=>setModal({type:'invite'});
     return null;
   }
   if(publicFormSlug)return <PublicFormPage slug={publicFormSlug}/>;
@@ -1148,9 +1193,11 @@ export default function App() {
     <Sidebar user={user} active={page} onNavigate={(target)=>{navigate(target);setCollapsed(false);}} collapsed={collapsed} setCollapsed={setCollapsed} onLogout={logout} workspaceName={settings.workspaceName} supportEmail={settings.supportEmail}/>
     <div className="main-column"><Header user={user} page={page} query={query} setQuery={setQuery} onMenu={()=>setCollapsed(!collapsed)} onLogout={logout} onNotifications={()=>navigate('Notifications')} unreadCount={data?.activity?.filter((item)=>!item.read_at).length||0}/>
       <main className="page-content">
-        {page==='Dashboard'?<>{!dismissed&&!preferences.hideWelcome&&<Welcome user={user} employee={employee} dismiss={false} onDismiss={()=>setDismissed(true)} workspaceName={settings.workspaceName}/>}{error&&<div className="error-banner">{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}{data?(data.role==='team'?<TeamDashboard data={data} user={user} onNavigate={navigate}/>:employee?<EmployeeDashboard data={data} onNavigate={navigate} onApply={apply}/>:<AdminDashboard data={data} permissions={user.permissions} onNavigate={navigate}/>):<div className="dashboard-loading"><LoaderCircle className="spin"/>Loading your dashboard…</div>}</>:<><div className="page-title-row"><div><span className="eyebrow">{employee?'ANNOTATOR WORKSPACE':'ANNOTRA TEAM WORKSPACE'}</span><h1>{page}</h1><p>{page==='Forms'?'Build shareable forms, collect responses, and export your data.':page==='Roles & Permissions'?'Create role profiles and choose which permissions each role receives.':page==='Employees'?'Review registrations, manage account status, and assign authorized roles.':employee?`Welcome back, ${user.name.split(' ')[0]}. Here's your ${page.toLowerCase()} view.`:`Manage ${page.toLowerCase()} for your annotation team.`}</p></div>{createAllowed&&pageAction()&&<button className="button primary" onClick={pageAction()}><Plus size={16}/>{page==='Email Invitations'?'Send Invitations':page==='Roles & Permissions'?'Create Role':`Add ${page==='Employees'?'Employee':page==='Projects'?'Project':page==='Vendors'?'Vendor':'Announcement'}`}</button>}</div>{error&&<div className="error-banner">{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
+        {page==='Dashboard'?<>{!dismissed&&!preferences.hideWelcome&&<Welcome user={user} employee={employee} dismiss={false} onDismiss={()=>setDismissed(true)} workspaceName={settings.workspaceName}/>}{error&&<div className="error-banner" role="alert">{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}{data?(data.role==='team'?<TeamDashboard data={data} user={user} onNavigate={navigate}/>:employee?<EmployeeDashboard data={data} onNavigate={navigate} onApply={apply}/>:<AdminDashboard data={data} permissions={user.permissions} onNavigate={navigate}/>):<div className="dashboard-loading"><LoaderCircle className="spin"/>Loading your dashboard…</div>}</>:<><div className="page-title-row"><div><span className="eyebrow">{employee?'ANNOTATOR WORKSPACE':'ANNOTRA TEAM WORKSPACE'}</span><h1>{page}</h1><p>{page==='Forms'?'Build shareable forms, collect responses, and export your data.':page==='Roles & Permissions'?'Create role profiles and choose which permissions each role receives.':page==='Employees'?'Review registrations, manage account status, and assign authorized roles.':page==='Email Invitations'?'Compose, personalize, and send campaigns with reusable templates.':employee?`Welcome back, ${user.name.split(' ')[0]}. Here's your ${page.toLowerCase()} view.`:`Manage ${page.toLowerCase()} for your annotation team.`}</p></div>{createAllowed&&pageAction()&&<button className="button primary" onClick={pageAction()}><Plus size={16}/>{page==='Email Invitations'?'Send Invitations':page==='Roles & Permissions'?'Create Role':`Add ${page==='Employees'?'Employee':page==='Projects'?'Project':page==='Vendors'?'Vendor':'Announcement'}`}</button>}</div>{error&&<div className="error-banner" role="alert">{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
+          {listLoading&&<div className="list-loading" role="status"><LoaderCircle className="spin" size={16}/>Loading records…</div>}
           {page==='Settings'?<SettingsPage settings={settings} preferences={preferences} canManageSettings={user.permissions?.includes('settings.manage')||user.role==='Super Admin'} onSaveSettings={saveSettings} onSavePreferences={savePreferences} busy={busy}/>
           :page==='Forms'?<FormsPage/>
+          :page==='Email Invitations'?<EmailStudioPage lookups={lookups} invitations={items} emailConfig={emailConfig} templates={emailTemplates} currentUser={user} templatesSupported={templatesSupported} onChanged={refresh} notify={notify}/>
           :page==='Messages'||page==='Support'?<Panel title={page}><div className="empty-state"><span><CircleHelp size={24}/></span><b>{page==='Messages'?'No messages yet':'How can we help?'}</b><p>{page==='Support'?(settings.supportEmail?<>Contact your administrator at <a href={`mailto:${settings.supportEmail}`}>{settings.supportEmail}</a>.</>:'Contact your team administrator for account or project support.'):'Updates about applications and projects will appear here.'}</p></div></Panel>
           :page==='Reports'?<Panel title="Reports overview"><div className="stats-grid report-stats">{items[0]&&Object.entries(items[0]).map(([key,value])=><StatCard key={key} title={key.replaceAll('_',' ')} value={value} tone="blue" icon={BarChart3}/>)}</div></Panel>
           :page==='My Profile'?<Panel title="My Profile" action={{label:'Edit Profile',onClick:()=>setModal({type:'profile',record:items[0]||{}})}}><div className="profile-card">{items[0]?.profile_photo_url?<img className="avatar profile-avatar" src={items[0].profile_photo_url} alt="Profile"/>:<span className="avatar profile-avatar">{user.name?.split(' ').map((part)=>part[0]).slice(0,2).join('')}</span>}<div><h2>{user.name}</h2><p>{user.role} · {user.mobile}</p><StatusBadge value={items[0]?.status||'Active'}/><small className="profile-email">{items[0]?.email}</small></div></div><div className="profile-documents">{[['profile-photo','Profile Photo','image/*',items[0]?.profile_photo_url],['resume','Resume','application/pdf,.doc,.docx',items[0]?.resume_url],['id-proof','ID Proof','application/pdf,.jpg,.jpeg,.png',items[0]?.id_proof_url]].map(([kind,label,accept,url])=>{const document=items[0]?.documents?.find((item)=>item.document_type===kind);return <label key={kind}><span><b>{label}</b><small>{url?<a href={url} target="_blank" rel="noreferrer">View current file</a>:'Not uploaded'}</small></span><div className="profile-file-actions"><input type="file" accept={accept} onChange={(event)=>uploadOwnDocument(kind,event.target.files?.[0])}/>{document&&<button type="button" className="mini-action reject" onClick={()=>deleteOwnDocument(document.id)}>Delete</button>}</div></label>})}</div></Panel>
@@ -1160,7 +1207,7 @@ export default function App() {
       </main>
     </div>
     {collapsed&&<button className="mobile-scrim" onClick={()=>setCollapsed(false)} aria-label="Close sidebar"/>}
-    {toast&&<div className="toast"><CircleCheckBig size={16}/>{toast}</div>}
+    {toast&&<div className="toast" role="status" aria-live="polite"><CircleCheckBig size={16}/>{toast}</div>}
     {modal&&<Modal type={modal.type} lookups={lookups} record={modal.record||{}} onClose={()=>setModal(null)} onSubmit={submitModal} busy={busy} emailConfigured={emailConfig.configured} emailMissing={emailConfig.missing} emailFrom={emailConfig.from} errorMessage={error}/>}
   </div>;
 }

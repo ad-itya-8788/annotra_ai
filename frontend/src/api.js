@@ -14,6 +14,7 @@ function sendRequest(path, options) {
     ...options,
     headers,
     credentials: 'include',
+    signal: options.signal || (typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(20_000) : undefined),
   });
 }
 
@@ -58,6 +59,7 @@ export async function api(path, options = {}) {
     && method !== 'GET'
     && method !== 'HEAD'
     && payload?.error === 'Invalid CSRF token.'
+    && !options.csrfRetried
   ) {
     const sessionResponse = await fetch('/api/auth/session', {
       credentials: 'include',
@@ -66,9 +68,22 @@ export async function api(path, options = {}) {
     if (sessionResponse.ok) {
       const session = await sessionResponse.json();
       setCsrfToken(session.csrfToken || null);
-      response = await sendRequest(path, options);
+      response = await sendRequest(path, { ...options, csrfRetried: true });
       payload = await readPayload(response);
     }
+    if (!response.ok && payload?.error === 'Invalid CSRF token.') {
+      setCsrfToken(null);
+      response = await sendRequest(path, { ...options, csrfRetried: true });
+      payload = await readPayload(response);
+    }
+  }
+  if (response.status === 401 && typeof window !== 'undefined'
+      && !path.startsWith('/public/forms/')
+      && !path.startsWith('/auth/login')
+      && !path.startsWith('/auth/send-otp')
+      && !path.startsWith('/auth/verify-otp')
+      && !path.startsWith('/auth/register/')) {
+    window.dispatchEvent(new CustomEvent('projectflow:session-expired'));
   }
   if (!response.ok) {
     const serverMessage = payload && typeof payload === 'object' && typeof payload.error === 'string'

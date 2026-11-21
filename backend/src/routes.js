@@ -2,7 +2,6 @@ import { Router } from 'express';
 import { randomBytes } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
-import nodemailer from 'nodemailer';
 import { pool, inTransaction } from './db.js';
 import { config } from './config.js';
 import { asyncRoute, hasPermission, permission, requireAuth, requireCsrf } from './middleware.js';
@@ -11,6 +10,7 @@ import { sendOtp, verifyOtp } from './services/messageCentral.js';
 import { readPrivateFile, removePrivateFile, savePrivateUpload } from './services/privateStorage.js';
 import { deleteFile, uploadFile } from './services/storage.js';
 import { normalizeFormAnswers, normalizeFormDefinition } from './formSchemas.js';
+import { createTransporter, htmlToPlain, invitationHtml, mailConfig } from './services/mailer.js';
 
 export const router = Router();
 router.use(requireCsrf);
@@ -51,6 +51,10 @@ const upload = multer({
     callback(valid ? null : Object.assign(new Error('Unsupported file type.'), { status: 400 }), valid);
   },
 });
+const emailAttachments = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 5 },
+});
 const resumeUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: config.privateFileMaxBytes, files: 2 },
@@ -80,6 +84,12 @@ const required = (value, label) => {
   return result;
 };
 const csvArray = (value) => Array.isArray(value) ? value.map((item) => text(item, 100)).filter(Boolean) : [];
+const parseJsonField = (value, fallback) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return fallback;
+  try { return JSON.parse(value); } catch { return fallback; }
+};
 const canGrantPermissions = (user, codes) => user.role === 'Super Admin'
   || codes.every((code) => user.permissions?.includes(code));
 const sessionUser = (row) => ({ id: row.id, name: row.full_name, mobile: row.mobile, role: row.role_name, permissions: row.permissions || [] });
@@ -989,14 +999,14 @@ router.get('/private-files/:fileName', requireAuth, asyncRoute(async (req,res)=>
 router.patch('/employees/:id', requireAuth, asyncRoute(async (req,res)=>{
   const owner=req.params.id===req.session.user.id;
   if(!owner&&!await hasPermission(req.session.user,'employees.edit'))return res.status(403).json({error:'You do not have permission to edit this employee.'});
-  const b=req.body;
+  const b={...req.body};
   if(b.email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.email)))return res.status(400).json({error:'Enter a valid email address.'});
   if(b.mobile) {
     const mobile = cleanMobile(b.mobile);
     if(!mobile) return res.status(400).json({error:'Enter a valid Indian mobile number.'});
     b.mobile = mobile;
   }
-  if(b.status && !['active','inactive','pending','rejected'].includes(b.status)) return res.status(400).json({error:'Select a valid account status.'});
+  delete b.status;
   if(b.roleId && (owner||req.params.id===req.session.user.id)) return res.status(403).json({error:'You cannot change your own role.'});
   if(b.roleId && !await hasPermission(req.session.user,'employees.assign_role')) return res.status(403).json({error:'You do not have permission to assign roles.'});
   const skills=b.skills===undefined?null:csvArray(b.skills);
@@ -1431,19 +1441,77 @@ router.delete('/project-attachments/:id', permission('projects.edit'), asyncRout
   res.status(204).end();
 }));
 
-router.get('/invitations/config', permission('invitations.send'), (_req,res)=>res.json({data:{
-  configured:config.email.configured,
-  missing:config.email.missing,
-  host:config.email.host,
-  port:config.email.port,
-  from:config.email.from,
-}}));
+router.get('/invitations/config', permission('invitations.send'), (_req,res)=>res.json({data:mailConfig()}));
 
-router.post('/invitations', permission('invitations.send'), asyncRoute(async (req,res)=>{
-  const {projectId,employeeIds,subject,message}=req.body;
+const isUuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
+
+router.get('/email-templates', permission('invitations.send'), asyncRoute(async(req,res)=>{
+  const {rows}=await pool.query(
+    `SELECT t.id,t.name,t.subject,t.body_html,t.is_shared,t.created_by,t.created_at,t.updated_at,
+       e.full_name AS created_by_name
+      FROM email_templates t LEFT JOIN employees e ON e.id=t.created_by
+      WHERE t.is_shared=TRUE OR t.created_by=$1
+      ORDER BY t.is_shared DESC,t.updated_at DESC`,
+    [req.session.user.id],
+  );
+  res.json({data:rows});
+}));
+
+router.post('/email-templates', permission('invitations.send'), asyncRoute(async(req,res)=>{
+  const name=required(req.body.name,'Template name').slice(0,120);
+  const subject=required(req.body.subject,'Email subject');
+  const bodyHtml=required(req.body.bodyHtml,'Email body');
+  const isShared=req.body.isShared===true||req.body.isShared==='true';
+  const {rows}=await pool.query(
+    `INSERT INTO email_templates (name,subject,body_html,is_shared,created_by)
+     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [name,subject,bodyHtml,isShared,req.session.user.id],
+  );
+  res.status(201).json({data:rows[0]});
+}));
+
+router.patch('/email-templates/:id', permission('invitations.send'), asyncRoute(async(req,res)=>{
+  if(!isUuid(req.params.id))return res.status(400).json({error:'Template ID is invalid.'});
+  const {rows:existing}=await pool.query('SELECT * FROM email_templates WHERE id=$1',[req.params.id]);
+  if(!existing.rows[0])return res.status(404).json({error:'Template not found.'});
+  if(existing.rows[0].created_by!==req.session.user.id&&req.session.user.role!=='Super Admin') {
+    return res.status(403).json({error:'You can only edit your own templates.'});
+  }
+  const name=required(req.body.name,'Template name').slice(0,120);
+  const subject=required(req.body.subject,'Email subject');
+  const bodyHtml=required(req.body.bodyHtml,'Email body');
+  const isShared=req.body.isShared===true||req.body.isShared==='true';
+  const {rows}=await pool.query(
+    `UPDATE email_templates SET name=$1,subject=$2,body_html=$3,is_shared=$4,updated_at=NOW()
+      WHERE id=$5 RETURNING *`,
+    [name,subject,bodyHtml,isShared,req.params.id],
+  );
+  res.json({data:rows[0]});
+}));
+
+router.delete('/email-templates/:id', permission('invitations.send'), asyncRoute(async(req,res)=>{
+  if(!isUuid(req.params.id))return res.status(400).json({error:'Template ID is invalid.'});
+  const {rows:existing}=await pool.query('SELECT created_by FROM email_templates WHERE id=$1',[req.params.id]);
+  if(!existing.rows[0])return res.status(404).json({error:'Template not found.'});
+  if(existing.rows[0].created_by!==req.session.user.id&&req.session.user.role!=='Super Admin') {
+    return res.status(403).json({error:'You can only delete your own templates.'});
+  }
+  await pool.query('DELETE FROM email_templates WHERE id=$1',[req.params.id]);
+  res.status(204).end();
+}));
+
+router.post('/invitations', permission('invitations.send'), emailAttachments.array('attachments',5), asyncRoute(async (req,res)=>{
+  const employeeIds=parseJsonField(req.body.employeeIds,[]);
   if(!Array.isArray(employeeIds)||!employeeIds.length||employeeIds.length>100)return res.status(400).json({error:'Select between 1 and 100 employees.'});
-  const emailSubject=required(subject,'Email subject');
-  const emailMessage=required(message,'Invitation message');
+  const projectId=text(req.body.projectId,50);
+  if(!isUuid(projectId))return res.status(400).json({error:'Select a valid project.'});
+  const templateId=req.body.templateId&&isUuid(req.body.templateId)?text(req.body.templateId,50):null;
+  const emailSubject=required(req.body.subject,'Email subject');
+  const bodyHtml=typeof req.body.bodyHtml==='string'?req.body.bodyHtml.slice(0,100000):'';
+  const emailMessage=text(req.body.message||htmlToPlain(bodyHtml),20000);
+  if(!emailMessage&&!bodyHtml)return res.status(400).json({error:'Write an email message before sending.'});
+  const files=Array.isArray(req.files)?req.files:[];
+  if(files.reduce((total,file)=>total+file.size,0)>10*1024*1024)return res.status(413).json({error:'Attachments must total 10 MB or less.'});
   if(!config.email.configured) {
     return res.status(503).json({
       error:`Email sending is not configured. Add ${config.email.missing.join(', ')} to the backend environment, then restart the backend.`,
@@ -1461,25 +1529,40 @@ router.post('/invitations', permission('invitations.send'), asyncRoute(async (re
   if(recipients.some((employee)=>!employee.email?.trim())) {
     return res.status(400).json({error:'Add an email address to every selected employee before sending invitations.'});
   }
-  const transporter=nodemailer.createTransport({
-    host:config.email.host,
-    port:config.email.port,
-    secure:config.email.port===465,
-    auth:{user:config.email.user,pass:config.email.password},
-  });
-  const outcomes=[];
-  for(const employee of recipients){
-    let status='Sent';
-    try {
-      await transporter.sendMail({from:config.email.from,to:employee.email,subject:emailSubject,text:`${emailMessage}\n\nProject: ${projectRows[0].name}`});
-    } catch (error) {
-      status='Failed';
-      console.error(`Invitation email failed for employee ${employee.id}:`,error.message);
+  const transporter=createTransporter();
+  const html=invitationHtml(bodyHtml,emailMessage,projectRows[0].name);
+  const attachments=files.map((file)=>({filename:file.originalname,content:file.buffer,contentType:file.mimetype}));
+  const outcomes=new Array(recipients.length);
+  let nextIndex=0;
+  async function sendNext(){
+    while(nextIndex<recipients.length){
+      const index=nextIndex++;
+      const employee=recipients[index];
+      let status='Sent';
+      try {
+        await transporter.sendMail({
+          from:config.email.from,
+          to:employee.email,
+          subject:emailSubject,
+          text:`${emailMessage}\n\nProject: ${projectRows[0].name}`,
+          html,
+          attachments,
+        });
+      } catch (error) {
+        status='Failed';
+        console.error(`Invitation email failed for employee ${employee.id}:`,error.message);
+      }
+      await pool.query(`INSERT INTO project_invitations (project_id,employee_id,subject,message,status,body_html,attachment_names,template_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT (project_id,employee_id) DO UPDATE SET subject=EXCLUDED.subject,message=EXCLUDED.message,status=EXCLUDED.status,body_html=EXCLUDED.body_html,attachment_names=EXCLUDED.attachment_names,template_id=EXCLUDED.template_id,created_at=NOW()`,
+        [projectId,employee.id,emailSubject,emailMessage,status,bodyHtml||null,attachments.map((file)=>file.filename),templateId]);
+      outcomes[index]={employeeId:employee.id,status};
     }
-    await pool.query(`INSERT INTO project_invitations (project_id,employee_id,subject,message,status)
-      VALUES ($1,$2,$3,$4,$5) ON CONFLICT (project_id,employee_id) DO UPDATE SET subject=EXCLUDED.subject,message=EXCLUDED.message,status=EXCLUDED.status,created_at=NOW()`,
-      [projectId,employee.id,emailSubject,emailMessage,status]);
-    outcomes.push({employeeId:employee.id,status});
+  }
+  try {
+    await Promise.all(Array.from({length:Math.min(5,recipients.length)},()=>sendNext()));
+  } finally {
+    await transporter.close();
   }
   res.status(201).json({data:outcomes});
 }));
@@ -1502,6 +1585,8 @@ router.use((error,req,res,_next)=>{
   if(error instanceof multer.MulterError)return res.status(error.code==='LIMIT_FILE_SIZE'?413:400).json({error:error.code==='LIMIT_FILE_SIZE'?(req.path.startsWith('/auth/register/')?'File must be no larger than 5 MB.':req.path.startsWith('/public/forms/')?'File must be no larger than 4 MB.':'File must be no larger than 10 MB.'):error.message});
   if(error.code==='23505')return res.status(409).json({error:'A record with the same unique value already exists.'});
   if(error.code==='23503'||error.code==='23514')return res.status(400).json({error:'One or more supplied values are not valid for this record.'});
+  if(error.code==='22P02')return res.status(400).json({error:'One or more identifiers are not valid.'});
+  if(error.code==='22007')return res.status(400).json({error:'One or more dates are not valid.'});
   const status=Number(error.status)||500;
   if(status>=500)console.error(error);
   const databaseUnavailable = (!error.status || status>=500)

@@ -37,6 +37,9 @@ export async function requireAuth(req, res, next) {
 
 export async function hasPermission(user, code) {
   if (!user) return false;
+  if (user.role && Array.isArray(user.permissions)) {
+    return user.role === 'Super Admin' || user.permissions.includes(code);
+  }
   const current=await loadActiveUser(user.id);
   if(!current)return false;
   Object.assign(user,current);
@@ -67,13 +70,26 @@ export function permission(code) {
   };
 }
 
+const allowedOrigins = new Set([
+  config.frontendUrl,
+  ...(config.nodeEnv === 'production' ? [] : ['http://localhost:5173', 'http://127.0.0.1:5173']),
+]);
+
+const publicAuthPaths = [
+  '/auth/login',
+  '/auth/send-otp',
+  '/auth/verify-otp',
+  '/auth/register/send-otp',
+  '/auth/register/verify-otp',
+];
+
 export function requireCsrf(req, res, next) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   const origin = req.get('origin');
-  if (origin && origin !== config.frontendUrl && origin !== 'http://localhost:5173') {
+  if (origin && !allowedOrigins.has(origin)) {
     return res.status(403).json({ error: 'Request origin is not allowed.' });
   }
-  if (!req.session.user) return next();
+  if (!req.session.user || publicAuthPaths.some((path) => req.path === path)) return next();
   const token = req.get('x-csrf-token');
   if (!token || token !== req.session.csrfToken) {
     return res.status(403).json({ error: 'Invalid CSRF token.' });

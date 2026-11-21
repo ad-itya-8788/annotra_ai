@@ -33,6 +33,9 @@ try {
       );
     }
   }
+  if (process.env.NODE_ENV === 'production' && !process.argv.includes('--allow-demo-data')) {
+    throw new Error('Refusing to apply demo seed data in production. Use --allow-demo-data only when you intentionally want sample records.');
+  }
   await pool.query(await fs.readFile(path.join(root, 'schema.sql'), 'utf8'));
   if (!process.argv.includes('--schema-only')) {
     await pool.query(await fs.readFile(path.join(root, 'seeds', 'seed.sql'), 'utf8'));

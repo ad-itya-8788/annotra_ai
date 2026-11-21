@@ -290,10 +290,12 @@ export function PublicFormPage({ slug }) {
 
   useEffect(() => {
     let active = true;
-    Promise.all([api(`/public/forms/${encodeURIComponent(slug)}`), api('/auth/session')])
-      .then(([formResult, sessionResult]) => {
+    api(`/public/forms/${encodeURIComponent(slug)}`)
+      .then(async (formResult) => {
         if (!active) return;
-        setCsrfToken(sessionResult.csrfToken);
+        const sessionResult = await api('/auth/session').catch(() => null);
+        if (!active) return;
+        if (sessionResult?.csrfToken) setCsrfToken(sessionResult.csrfToken);
         setForm(formResult.data);
         updatePageMetadata({
           title: `${formResult.data.title} | Annotra AI`,

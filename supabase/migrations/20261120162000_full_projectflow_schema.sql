@@ -151,9 +151,25 @@ CREATE TABLE IF NOT EXISTS project_invitations (
   message TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('Sent', 'Delivered', 'Failed', 'Accepted', 'Declined')),
   provider_message_id TEXT,
+  body_html TEXT,
+  attachment_names TEXT[],
+  template_id UUID,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (project_id, employee_id)
 );
+
+CREATE TABLE IF NOT EXISTS email_templates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body_html TEXT NOT NULL,
+  is_shared BOOLEAN NOT NULL DEFAULT FALSE,
+  created_by UUID REFERENCES employees(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS email_templates_shared_idx ON email_templates(is_shared, created_at DESC);
+CREATE INDEX IF NOT EXISTS email_templates_created_by_idx ON email_templates(created_by, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS notifications (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -378,7 +394,8 @@ INSERT INTO app_migrations (name) VALUES
   ('20261027_employee_signup.sql'),
   ('20261028000000_workspace_settings_preferences.sql'),
   ('20261028010000_chat_meetings.sql'),
-  ('20261120000000_custom_forms.sql')
+  ('20261120000000_custom_forms.sql'),
+  ('20261121090000_email_studio.sql')
 ON CONFLICT (name) DO NOTHING;
 
 DO $$
@@ -388,7 +405,7 @@ BEGIN
   FOREACH table_name IN ARRAY ARRAY[
     'roles','permissions','role_permissions','employees','vendors','projects',
     'project_attachments','project_applications','project_assignments','announcements',
-    'custom_forms','custom_form_responses','announcement_recipients','project_invitations',
+    'custom_forms','custom_form_responses','announcement_recipients','project_invitations','email_templates',
     'notifications','employee_documents','otp_sessions','employee_registration_otps',
     'auth_sessions','audit_logs','system_settings','employee_preferences','conversations',
     'conversation_participants','messages','meetings','meeting_participants','meeting_messages',

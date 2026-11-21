@@ -82,8 +82,9 @@ if (config.nodeEnv === 'production' && existsSync(frontendDist)) {
   });
 }
 app.use((error,_req,res,_next)=>{
-  console.error(error);
-  res.status(500).json({error:'An unexpected server error occurred.'});
+  const status=Number(error.status)||500;
+  if(status>=500)console.error(error);
+  res.status(status).json({error:status>=500?'An unexpected server error occurred.':error.message||'The request could not be completed.'});
 });
 
 const server=httpServer.listen(config.port,()=>{

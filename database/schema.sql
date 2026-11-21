@@ -151,9 +151,25 @@ CREATE TABLE IF NOT EXISTS project_invitations (
   message TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('Sent', 'Delivered', 'Failed', 'Accepted', 'Declined')),
   provider_message_id TEXT,
+  body_html TEXT,
+  attachment_names TEXT[],
+  template_id UUID,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (project_id, employee_id)
 );
+
+CREATE TABLE IF NOT EXISTS email_templates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body_html TEXT NOT NULL,
+  is_shared BOOLEAN NOT NULL DEFAULT FALSE,
+  created_by UUID REFERENCES employees(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS email_templates_shared_idx ON email_templates(is_shared, created_at DESC);
+CREATE INDEX IF NOT EXISTS email_templates_created_by_idx ON email_templates(created_by, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS notifications (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

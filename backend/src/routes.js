@@ -1587,7 +1587,7 @@ router.post('/invitations', permission('invitations.send'), emailAttachments.arr
     if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return res.status(400).json({error:'Enter a valid address for every custom recipient.'});
     if(!normalizedCustomRecipients.some((recipient)=>recipient.email===email))normalizedCustomRecipients.push({email,name});
   }
-  const projectId=text(req.body.projectId,50);
+  const projectId=text(req.body.projectId,50)||null;
   if(projectId&&!isUuid(projectId))return res.status(400).json({error:'Select a valid project.'});
   if(employeeIds.length&&!projectId)return res.status(400).json({error:'Choose a project when sending to workspace employees.'});
   if(!projectId&&!normalizedCustomRecipients.length)return res.status(400).json({error:'Choose a project or add a custom email recipient.'});

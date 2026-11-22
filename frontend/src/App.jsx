@@ -126,21 +126,37 @@ export default function App() {
     const requestId=++refreshId.current;
     setError('');setListLoading(true);
     try {
-      if(page==='Dashboard')setData(await api('/dashboard'));
-      else if(page==='My Projects')setItems((await api('/projects?assigned=true')).data);
-      else if(page==='Available Projects')setItems((await api('/projects?available=true')).data);
-      else if(page==='My Applications'){
-        setItems((await api('/my-applications')).data);
+      if(page==='Dashboard'){
+        const result=await api('/dashboard');
+        if(requestId!==refreshId.current)return;
+        setData(result);
+      } else if(page==='My Projects'){
+        const result=await api('/projects?assigned=true');
+        if(requestId!==refreshId.current)return;
+        setItems(result.data);
+      } else if(page==='Available Projects'){
+        const result=await api('/projects?available=true');
+        if(requestId!==refreshId.current)return;
+        setItems(result.data);
+      } else if(page==='My Applications'){
+        const result=await api('/my-applications');
+        if(requestId!==refreshId.current)return;
+        setItems(result.data);
       } else if(page==='My Profile'){
         const result=await api(`/employees/${user.id}`);
+        if(requestId!==refreshId.current)return;
         setItems([result.data]);
       } else if(page==='Settings'){
         const [systemResult,preferenceResult]=await Promise.all([api('/settings'),api('/preferences')]);
+        if(requestId!==refreshId.current)return;
         setSettings(systemResult.data);
         setPreferences(preferenceResult.data);
       } else if(page==='Messages'||page==='Support'||page==='Reports'||page==='Forms'){
-        if(page==='Reports')setItems([await api('/reports/summary').then((r)=>r.data)]);
-        else setItems([]);
+        if(page==='Reports'){
+          const result=await api('/reports/summary');
+          if(requestId!==refreshId.current)return;
+          setItems([result.data]);
+        } else setItems([]);
       } else if(['Create Email','Send Email'].includes(page)){
         const [result,lookup,configResult,templateResult]=await Promise.all([
           api('/invitations'),
@@ -151,6 +167,7 @@ export default function App() {
             supported:false,
           })),
         ]);
+        if(requestId!==refreshId.current)return;
         setItems(result.data);
         setLookups((previous)=>({...previous,...lookup}));
         setEmailConfig(configResult.data);
@@ -160,19 +177,24 @@ export default function App() {
         const params=new URLSearchParams();
         for(const [key,value] of Object.entries(employeeFilters))if(value!==''&&value!==null&&value!==undefined)params.set(key,String(value));
         const result=await api(`/employees?${params}`);
+        if(requestId!==refreshId.current)return;
         setItems(result.data);
         setEmployeePagination(result.pagination);
       } else if(['Projects','Vendors','Applications'].includes(page)){
         const params=new URLSearchParams();
         for(const [key,value] of Object.entries(listFilters))if(value!==''&&value!==null&&value!==undefined)params.set(key,String(value));
         const result=await api(`${endpoints[page]}?${params}`);
+        if(requestId!==refreshId.current)return;
         setItems(result.data);
         setListPagination(result.pagination);
       } else if(endpoints[page]){
-        setItems((await api(endpoints[page])).data);
+        const result=await api(endpoints[page]);
+        if(requestId!==refreshId.current)return;
+        setItems(result.data);
       }
       if(['Employees','Projects','Vendors','Announcements','Roles & Permissions'].includes(page)||page==='Dashboard'){
         const result=await api('/lookups');
+        if(requestId!==refreshId.current)return;
         setLookups((previous)=>({...previous,...result}));
       }
     } catch(e){if(requestId===refreshId.current&&!e.stale)setError(e.message);}

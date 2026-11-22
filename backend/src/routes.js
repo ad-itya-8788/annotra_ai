@@ -1579,6 +1579,7 @@ router.post('/invitations', permission('invitations.send'), emailAttachments.arr
   if(!Array.isArray(employeeIds)||!Array.isArray(submittedCustomRecipients)||employeeIds.length+submittedCustomRecipients.length<1||employeeIds.length+submittedCustomRecipients.length>100) {
     return res.status(400).json({error:'Select between 1 and 100 employee or custom email recipients.'});
   }
+  if(employeeIds.some((id)=>!isUuid(id)))return res.status(400).json({error:'One or more employee IDs are invalid. Remove invalid employee selections and try again.'});
   const normalizedCustomRecipients=[];
   for(const entry of submittedCustomRecipients) {
     const email=text(entry?.email,254).toLowerCase();

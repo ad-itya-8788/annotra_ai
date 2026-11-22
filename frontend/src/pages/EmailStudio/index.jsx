@@ -235,7 +235,8 @@ export default function EmailStudioPage({ mode, lookups, invitations, emailConfi
       ...customRecipients,
       ...pendingEmails.map((email) => ({ email, name: email })),
     ];
-    const recipientCountToSend = selectedIds.length + customRecipientsToSend.length;
+    const employeeIdsToSend = sendMode === 'custom' ? [] : selectedIds;
+    const recipientCountToSend = employeeIdsToSend.length + customRecipientsToSend.length;
     if (emailConfig?.configured === false) {
       setError('Email is not configured on the backend. Check the configuration warning above.');
       return;
@@ -244,7 +245,7 @@ export default function EmailStudioPage({ mode, lookups, invitations, emailConfi
     if (sendMode === 'template' && !projects.length) { setError('No projects are available for invitations yet.'); return; }
     if (sendMode === 'template' && !projectId) { setError('Choose a project before sending this template.'); return; }
     if (sendMode === 'custom' && !customRecipientsToSend.length) { setError('Add at least one recipient email for your custom email.'); return; }
-    if (!selectedIds.length && !customRecipientsToSend.length) { setError('Select an employee or add a custom email recipient.'); return; }
+    if (!employeeIdsToSend.length && !customRecipientsToSend.length) { setError('Select an employee or add a custom email recipient.'); return; }
     if (!subject.trim()) { setError('Enter an email subject.'); return; }
     if (!htmlState.trim()) { setError('Write an email message before sending.'); return; }
     if (recipientCountToSend > 100) { setError('Select no more than 100 recipients per campaign.'); return; }
@@ -255,7 +256,7 @@ export default function EmailStudioPage({ mode, lookups, invitations, emailConfi
     try {
       const form = new FormData();
       if (projectId && sendMode === 'template') form.append('projectId', projectId);
-      form.append('employeeIds', JSON.stringify(selectedIds));
+      form.append('employeeIds', JSON.stringify(employeeIdsToSend));
       form.append('customRecipients', JSON.stringify(customRecipientsToSend));
       form.append('subject', subject.trim());
       form.append('message', stripHtml(htmlState));
@@ -273,7 +274,8 @@ export default function EmailStudioPage({ mode, lookups, invitations, emailConfi
       setSelectedIds([]);
       onChanged();
     } catch (requestError) {
-      const message = sendMode === 'custom' && /Select between 1 and 100 employees\.?/i.test(requestError.message)
+      const message = sendMode === 'custom'
+        && /Select between 1 and 100 employees\.?/i.test(requestError.message)
         ? 'The current email service does not support custom recipients yet. Deploy the latest backend, then try again. No email was sent.'
         : requestError.message;
       setError(message);

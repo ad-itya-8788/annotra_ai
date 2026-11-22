@@ -3,7 +3,8 @@ import {
   Activity, ArrowRight, BarChart3, Check, ChevronRight, CircleCheckBig, ClipboardList, FileText,
   FolderClosed, Headphones, Image, LockKeyhole, Menu, MessageSquare, Shield, Sparkles, Tag, UserRound, Users, X,
 } from 'lucide-react';
-import AnnotationDemo from './AnnotationDemo.jsx';
+import AnnotationDemo from '../../components/AnnotationDemo/index.jsx';
+import './index.css';
 
 const supportEmail = 'annotrai.help@gmail.com';
 const communityUrl = 'https://chat.whatsapp.com/Ke6DEqQdD1Q5twaxVUPRf9?s=cl&p=a&mlu=4&ilr=4';
@@ -42,8 +43,8 @@ export default function LandingPage({ onLogin }) {
             <img src="/img/Annotra AI Circular Tech Badge.png" alt="" />
             <span><b>Annotra</b><small>DATA ANNOTATION</small></span>
           </a>
-          <nav className={`px-nav ${menuOpen ? 'open' : ''}`} aria-label="Main navigation">
-            <a className="active" href="#home" onClick={closeMenu}>Home</a>
+          <nav id="landing-navigation" className={`px-nav ${menuOpen ? 'open' : ''}`} aria-label="Main navigation">
+            <a className="active" href="#home" aria-current="page" onClick={closeMenu}>Home</a>
             <a href="#services" onClick={closeMenu}>Services</a>
             <a href="#how-it-works" onClick={closeMenu}>How it works</a>
             <a href="#about" onClick={closeMenu}>About us</a>
@@ -52,7 +53,7 @@ export default function LandingPage({ onLogin }) {
           <div className="px-header-actions">
             <button className="px-login" type="button" onClick={onLogin}>Team Login</button>
             <a className="landing-start px-quote" href="#contact" onClick={closeMenu}>Get a Quote <ArrowRight size={15} /></a>
-            <button className="px-menu-toggle" type="button" aria-label={menuOpen ? 'Close menu' : 'Open menu'} aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
+            <button className="px-menu-toggle" type="button" aria-label={menuOpen ? 'Close menu' : 'Open menu'} aria-expanded={menuOpen} aria-controls="landing-navigation" onClick={() => setMenuOpen((open) => !open)}>
               {menuOpen ? <X size={20} /> : <Menu size={20} />}
             </button>
           </div>
@@ -212,3 +213,5 @@ export default function LandingPage({ onLogin }) {
     </div>
   );
 }
+
+

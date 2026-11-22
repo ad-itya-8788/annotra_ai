@@ -34,7 +34,7 @@ test('form definitions preserve optional input placeholders and file upload fiel
   }), { status: 400 });
 });
 
-test('answers enforce required fields and one configured checkbox option', () => {
+test('answers enforce required fields and valid checkbox options', () => {
   const { fields } = normalizeFormDefinition({
     title: 'Contact',
     fields: [
@@ -43,11 +43,14 @@ test('answers enforce required fields and one configured checkbox option', () =>
     ],
   });
   assert.throws(() => normalizeFormAnswers(fields, { email: 'person@example.com', topics: '' }), { status: 400 });
-  assert.throws(() => normalizeFormAnswers(fields, { email: 'person@example.com', topics: ['AI', 'Video'] }), { status: 400 });
   assert.throws(() => normalizeFormAnswers(fields, { email: 'person@example.com', topics: 'Unknown' }), { status: 400 });
   assert.deepEqual(normalizeFormAnswers(fields, { email: 'person@example.com', topics: 'AI' }), {
     email: 'person@example.com',
-    topics: 'AI',
+    topics: ['AI'],
+  });
+  assert.deepEqual(normalizeFormAnswers(fields, { email: 'person@example.com', topics: ['AI', 'Video'] }), {
+    email: 'person@example.com',
+    topics: ['AI', 'Video'],
   });
 });
 

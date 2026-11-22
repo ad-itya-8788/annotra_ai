@@ -19,6 +19,17 @@ async function loadActiveUser(id) {
   return rows[0] || null;
 }
 
+function syncSessionUser(req, user) {
+  const current = req.session.user;
+  const permissions = (value) => [...(value || [])].sort().join(',');
+  const unchanged = current
+    && current.id === user.id
+    && current.name === user.name
+    && current.role === user.role
+    && permissions(current.permissions) === permissions(user.permissions);
+  if (!unchanged) req.session.user = user;
+}
+
 export async function requireAuth(req, res, next) {
   if (!req.session.user) return res.status(401).json({ error: 'Authentication required.' });
   try {
@@ -28,7 +39,7 @@ export async function requireAuth(req, res, next) {
       res.clearCookie('projectflow.sid');
       return res.status(401).json({error:'This account is inactive or no longer exists.'});
     }
-    req.session.user=user;
+    syncSessionUser(req, user);
     next();
   } catch(error) {
     next(error);
@@ -55,7 +66,7 @@ export async function requirePermission(req, res, next) {
       res.clearCookie('projectflow.sid');
       return res.status(401).json({error:'This account is inactive or no longer exists.'});
     }
-    req.session.user=user;
+    syncSessionUser(req, user);
     if (user.role!=='Super Admin'&&!user.permissions.includes(req.permission)) return res.status(403).json({ error: 'You do not have permission to perform this action.' });
     next();
   } catch (error) {

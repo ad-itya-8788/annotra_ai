@@ -1,5 +1,6 @@
 import React from 'react';
 import { Activity, Check, FileText, Headphones, Image, ScanLine, Shield, Sparkles, Tag } from 'lucide-react';
+import './index.css';
 
 const stages = [
   { label: 'Raw data', detail: 'Unlabeled source', icon: Image },
@@ -149,3 +150,5 @@ export default function AnnotationDemo() {
     </div>
   );
 }
+
+

@@ -2,14 +2,14 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { config } from '../config.js';
 
-const allowedTypes = new Set([
+export const allowedTypes = new Set([
   'image/jpeg', 'image/png', 'image/webp',
   'application/pdf',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 ]);
 
-function contentMatchesMime(buffer, mimeType) {
+export function contentMatchesMime(buffer, mimeType) {
   if (mimeType === 'image/jpeg') return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
   if (mimeType === 'image/png') return buffer.subarray(0, 8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]));
   if (mimeType === 'image/webp') return buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
@@ -48,7 +48,12 @@ export async function deleteFile(fileUrl) {
   if (!storageZone || !apiKey || !cdnUrl) {
     throw Object.assign(new Error('Bunny Storage is not configured. Set its storage zone, API key and CDN URL.'),{status:503});
   }
-  const parsed = new URL(fileUrl);
+  let parsed;
+  try {
+    parsed = new URL(fileUrl);
+  } catch {
+    throw Object.assign(new Error('The stored URL is not a valid ProjectFlow Bunny CDN file.'), { status: 400 });
+  }
   const cdnHost = cdnUrl.replace(/^https?:\/\//,'').split('/')[0];
   if (parsed.hostname !== cdnHost || !/^\/(employee-documents|project-attachments|form-responses)\/[a-f0-9-]+\.[a-z0-9]+$/i.test(parsed.pathname)) {
     throw Object.assign(new Error('The stored URL is not a valid ProjectFlow Bunny CDN file.'),{status:400});

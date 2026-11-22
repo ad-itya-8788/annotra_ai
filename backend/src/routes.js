@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { randomBytes } from 'node:crypto';
+import path from 'node:path';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import { pool, inTransaction } from './db.js';
@@ -8,9 +9,9 @@ import { asyncRoute, hasPermission, permission, requireAuth, requireCsrf } from 
 import { hashPassword, verifyPassword } from './password.js';
 import { sendOtp, verifyOtp } from './services/messageCentral.js';
 import { readPrivateFile, removePrivateFile, savePrivateUpload } from './services/privateStorage.js';
-import { deleteFile, uploadFile } from './services/storage.js';
+import { allowedTypes, contentMatchesMime, deleteFile, uploadFile } from './services/storage.js';
 import { normalizeFormAnswers, normalizeFormDefinition } from './formSchemas.js';
-import { createTransporter, htmlToPlain, invitationHtml, mailConfig } from './services/mailer.js';
+import { createTransporter, htmlToPlain, invitationHtml, mailConfig, plainToHtml, sanitizeHtml } from './services/mailer.js';
 
 export const router = Router();
 router.use(requireCsrf);
@@ -54,6 +55,10 @@ const upload = multer({
 const emailAttachments = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024, files: 5 },
+  fileFilter: (_req, file, callback) => {
+    const valid = allowedTypes.has(file.mimetype);
+    callback(valid ? null : Object.assign(new Error('Attachments must be a PDF, DOC, DOCX, JPG, PNG, or WebP file.'), { status: 400 }), valid);
+  },
 });
 const resumeUpload = multer({
   storage: multer.memoryStorage(),
@@ -77,7 +82,22 @@ const validDateOnly = (value) => {
   const parsed = new Date(`${value}T00:00:00.000Z`);
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 };
+const projectFieldError = (body, partial = false) => {
+  for (const [key, label] of [['startDate', 'Start date'], ['endDate', 'End date'], ['applicationDeadline', 'Application deadline']]) {
+    if (body[key] && !validDateOnly(body[key])) return `Enter a valid ${label.toLowerCase()}.`;
+  }
+  if (body.startDate && body.endDate && body.endDate < body.startDate) return 'End date cannot be before start date.';
+  if (body.startDate && body.applicationDeadline && body.applicationDeadline > body.startDate) return 'Application deadline cannot be after start date.';
+  if ((!partial || body.requiredAnnotators !== undefined) && (!Number.isInteger(Number(body.requiredAnnotators)) || Number(body.requiredAnnotators) < 1)) {
+    return 'Required annotators must be a positive whole number.';
+  }
+  if (body.estimatedBudget && (!Number.isFinite(Number(body.estimatedBudget)) || Number(body.estimatedBudget) < 0)) {
+    return 'Enter a valid estimated budget.';
+  }
+  return null;
+};
 const text = (value, max = 5000) => typeof value === 'string' ? value.trim().slice(0, max) : '';
+const safeFileName = (value) => path.basename(String(value || 'attachment')).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || 'attachment';
 const required = (value, label) => {
   const result = text(value);
   if (!result) throw Object.assign(new Error(`${label} is required.`), { status: 400 });
@@ -625,7 +645,7 @@ router.get('/dashboard', permission('dashboard.view'), asyncRoute(async (req, re
     ),
     pool.query(
       `SELECT p.id,p.name,COALESCE(v.company_name,'No vendor assigned') AS vendor,p.status,p.application_deadline,
-        LEAST(100,GREATEST(0,COALESCE((SELECT COUNT(*)*100/p.required_annotators FROM project_assignments pa WHERE pa.project_id=p.id),0)))::int AS progress
+        ROUND(LEAST(100,GREATEST(0,COALESCE((SELECT COUNT(*)::numeric*100/NULLIF(p.required_annotators,0) FROM project_assignments pa WHERE pa.project_id=p.id),0))))::int AS progress
        FROM projects p LEFT JOIN vendors v ON v.id=p.vendor_id ORDER BY p.created_at DESC LIMIT 5`,
     ),
     pool.query(
@@ -696,25 +716,30 @@ router.post('/projects', permission('projects.create'), asyncRoute(async (req, r
   if (body.vendorId !== undefined && body.vendorId !== null && body.vendorId !== '' && !vendorId) {
     return res.status(400).json({ error: 'Select a valid vendor.' });
   }
-  if (vendorId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(vendorId)) {
+  if (vendorId && !isUuid(vendorId)) {
     return res.status(400).json({ error: 'Select a valid vendor.' });
   }
+  const fieldError = projectFieldError(body);
+  if (fieldError) return res.status(400).json({ error: fieldError });
   if(!['Draft','Published','In Progress','Completed','On Hold','Cancelled'].includes(status))return res.status(400).json({error:'Invalid project status.'});
   if(status==='Published'&&!await hasPermission(req.session.user,'projects.publish'))return res.status(403).json({error:'You do not have permission to publish projects.'});
   const { rows } = await pool.query(
     `INSERT INTO projects (name,code,vendor_id,description,instructions,required_skills,required_annotators,start_date,end_date,application_deadline,project_type,estimated_budget,status)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-    [required(body.name, 'Project name'),required(body.code, 'Project code'),vendorId,text(body.description),text(body.instructions),csvArray(body.requiredSkills),Math.max(1,Number(body.requiredAnnotators)||1),body.startDate||null,body.endDate||null,body.applicationDeadline||null,text(body.projectType,100)||'Annotation',body.estimatedBudget||null,status],
+    [required(body.name, 'Project name'),required(body.code, 'Project code'),vendorId,text(body.description),text(body.instructions),csvArray(body.requiredSkills),Number(body.requiredAnnotators),body.startDate||null,body.endDate||null,body.applicationDeadline||null,text(body.projectType,100)||'Annotation',body.estimatedBudget||null,status],
   );
   res.status(201).json({ data: rows[0] });
 }));
 
 router.patch('/projects/:id', permission('projects.edit'), asyncRoute(async (req, res) => {
   const body = req.body;
+  if(body.vendorId!==undefined&&body.vendorId!==null&&body.vendorId!==''&&!isUuid(body.vendorId))return res.status(400).json({error:'Select a valid vendor.'});
+  const fieldError = projectFieldError(body, true);
+  if (fieldError) return res.status(400).json({ error: fieldError });
   if(body.status&&!['Draft','Published','In Progress','Completed','On Hold','Cancelled'].includes(body.status))return res.status(400).json({error:'Invalid project status.'});
   if(body.status==='Published'&&!await hasPermission(req.session.user,'projects.publish'))return res.status(403).json({error:'You do not have permission to publish projects.'});
   const requiredSkills = body.requiredSkills===undefined?null:csvArray(body.requiredSkills);
-  const requiredAnnotators = body.requiredAnnotators===undefined?null:(Number(body.requiredAnnotators)||null);
+  const requiredAnnotators = body.requiredAnnotators===undefined?null:Number(body.requiredAnnotators);
   const { rows } = await pool.query(
     `UPDATE projects SET name=COALESCE($2,name),code=COALESCE($3,code),vendor_id=COALESCE($4,vendor_id),
        description=COALESCE($5,description),instructions=COALESCE($6,instructions),
@@ -1001,6 +1026,8 @@ router.patch('/employees/:id', requireAuth, asyncRoute(async (req,res)=>{
   if(!owner&&!await hasPermission(req.session.user,'employees.edit'))return res.status(403).json({error:'You do not have permission to edit this employee.'});
   const b={...req.body};
   if(b.email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.email)))return res.status(400).json({error:'Enter a valid email address.'});
+  if(b.dateOfBirth&&!validDateOnly(b.dateOfBirth))return res.status(400).json({error:'Enter a valid date of birth.'});
+  if(b.experienceYears!==undefined&&(!Number.isFinite(Number(b.experienceYears))||Number(b.experienceYears)<0))return res.status(400).json({error:'Enter valid experience in years.'});
   if(b.mobile) {
     const mobile = cleanMobile(b.mobile);
     if(!mobile) return res.status(400).json({error:'Enter a valid Indian mobile number.'});
@@ -1027,12 +1054,12 @@ router.patch('/employees/:id', requireAuth, asyncRoute(async (req,res)=>{
       await client.query('UPDATE employees SET role_id=$2,updated_at=NOW() WHERE id=$1',[req.params.id,b.roleId]);
     }
     const {rows}=await client.query(`UPDATE employees SET full_name=COALESCE($2,full_name),email=COALESCE($3,email),
-      mobile=COALESCE($4,mobile),date_of_birth=COALESCE($5,date_of_birth),gender=COALESCE($6,gender),address=COALESCE($7,address),
-      skills=COALESCE($8,skills),experience_years=COALESCE($9,experience_years),highest_qualification=COALESCE($10,highest_qualification),
-      city=COALESCE($11,city),linkedin_url=COALESCE($12,linkedin_url),employee_type=COALESCE($13,employee_type),status=COALESCE($14,status),
-      updated_at=NOW()
-      WHERE id=$1 RETURNING id,full_name,email,mobile,date_of_birth,gender,address,skills,experience_years,highest_qualification,city,linkedin_url,employee_type,status,role_id`,
-      [req.params.id,b.fullName||null,b.email||null,b.mobile||null,b.dateOfBirth||null,b.gender||null,b.address??null,skills,b.experienceYears===undefined?null:Number(b.experienceYears),b.highestQualification??null,b.city??null,b.linkedinUrl??null,b.employeeType||null,b.status||null]);
+       mobile=COALESCE($4,mobile),date_of_birth=COALESCE($5,date_of_birth),gender=COALESCE($6,gender),address=COALESCE($7,address),
+       skills=COALESCE($8,skills),experience_years=COALESCE($9,experience_years),highest_qualification=COALESCE($10,highest_qualification),
+       city=COALESCE($11,city),linkedin_url=COALESCE($12,linkedin_url),employee_type=COALESCE($13,employee_type),
+       updated_at=NOW()
+       WHERE id=$1 RETURNING id,full_name,email,mobile,date_of_birth,gender,address,skills,experience_years,highest_qualification,city,linkedin_url,employee_type,status,role_id`,
+       [req.params.id,b.fullName||null,b.email||null,b.mobile||null,b.dateOfBirth||null,b.gender||null,b.address??null,skills,b.experienceYears===undefined?null:Number(b.experienceYears),b.highestQualification??null,b.city??null,b.linkedinUrl??null,b.employeeType||null]);
     if(!rows[0]) throw Object.assign(new Error('Employee not found.'),{status:404});
     return rows[0];
   });
@@ -1171,10 +1198,12 @@ router.patch('/applications/:id', asyncRoute(async (req, res) => {
 router.get('/announcements', permission('announcements.view'), asyncRoute(async (req, res) => {
   const admin = req.session.user.role !== 'Annotator';
   const { rows } = await pool.query(
-    `SELECT a.id,a.title,a.body,a.priority,a.publish_at,a.expires_at,a.is_published
-     FROM announcements a
+    `SELECT a.id,a.title,a.body,a.priority,a.publish_at,a.expires_at,a.is_published,a.target_all,
+       COALESCE(array_agg(ar.employee_id) FILTER (WHERE ar.employee_id IS NOT NULL),'{}') AS employee_ids
+     FROM announcements a LEFT JOIN announcement_recipients ar ON ar.announcement_id=a.id
      WHERE $1::boolean OR (a.is_published=TRUE AND a.publish_at<=NOW() AND (a.expires_at IS NULL OR a.expires_at>NOW())
-       AND (a.target_all=TRUE OR EXISTS(SELECT 1 FROM announcement_recipients ar WHERE ar.announcement_id=a.id AND ar.employee_id=$2)))
+       AND (a.target_all=TRUE OR ar.employee_id=$2))
+     GROUP BY a.id
      ORDER BY a.publish_at DESC LIMIT 100`,
     [admin,req.session.user.id],
   );
@@ -1194,15 +1223,24 @@ router.patch('/notifications/:id/read', requireAuth, asyncRoute(async(req,res)=>
 
 router.post('/announcements', permission('announcements.create'), asyncRoute(async (req, res) => {
   const b=req.body;
-  if(b.isPublished===true&&!await hasPermission(req.session.user,'announcements.publish'))return res.status(403).json({error:'You do not have permission to publish announcements.'});
-  if(b.targetAll===false&&(!Array.isArray(b.employeeIds)||!b.employeeIds.length))return res.status(400).json({error:'Select at least one employee for a targeted announcement.'});
+  const publish = b.isPublished===true||b.isPublished==='true';
+  if(publish&&!await hasPermission(req.session.user,'announcements.publish'))return res.status(403).json({error:'You do not have permission to publish announcements.'});
+  if(b.priority&&!['Low','Normal','High','Urgent'].includes(b.priority))return res.status(400).json({error:'Invalid announcement priority.'});
+  if(b.publishAt&&!validDateOnly(b.publishAt))return res.status(400).json({error:'Enter a valid publish date.'});
+  if(b.expiresAt&&!validDateOnly(b.expiresAt))return res.status(400).json({error:'Enter a valid expiry date.'});
+  if(b.expiresAt&&b.publishAt&&b.expiresAt<b.publishAt)return res.status(400).json({error:'Expiry date cannot be before publish date.'});
+  const targetAll = b.targetAll===undefined?true:(b.targetAll===true||b.targetAll==='true');
+  if(!targetAll){
+    if(!Array.isArray(b.employeeIds)||!b.employeeIds.length)return res.status(400).json({error:'Select at least one employee for a targeted announcement.'});
+    if(b.employeeIds.some((id)=>!isUuid(id)))return res.status(400).json({error:'Select valid announcement recipients.'});
+  }
   const result=await inTransaction(async(client)=>{
     const { rows }=await client.query(
       `INSERT INTO announcements (title,body,priority,publish_at,expires_at,is_published,target_all,created_by)
        VALUES ($1,$2,$3,COALESCE($4,NOW()),$5,$6,$7,$8) RETURNING *`,
-      [required(b.title,'Title'),required(b.body,'Message'),b.priority||'Normal',b.publishAt||null,b.expiresAt||null,b.isPublished===true,b.targetAll!==false,req.session.user.id],
-    );
-    if(b.targetAll===false&&Array.isArray(b.employeeIds)&&b.employeeIds.length){
+       [required(b.title,'Title'),required(b.body,'Message'),b.priority||'Normal',b.publishAt||null,b.expiresAt||null,publish,targetAll,req.session.user.id],
+     );
+     if(!targetAll&&Array.isArray(b.employeeIds)&&b.employeeIds.length){
       await client.query('INSERT INTO announcement_recipients (announcement_id,employee_id) SELECT $1,id FROM employees WHERE id=ANY($2::uuid[]) ON CONFLICT DO NOTHING',[rows[0].id,b.employeeIds]);
     }
     return rows[0];
@@ -1212,18 +1250,40 @@ router.post('/announcements', permission('announcements.create'), asyncRoute(asy
 
 router.patch('/announcements/:id', permission('announcements.create'), asyncRoute(async (req,res)=>{
   const b=req.body;
+  const { rows: existingRows } = await pool.query('SELECT is_published,target_all FROM announcements WHERE id=$1',[req.params.id]);
+  const existing = existingRows[0];
+  if(!existing)return res.status(404).json({error:'Announcement not found.'});
+  const nextPublished = b.isPublished===undefined?existing.is_published:(b.isPublished===true||b.isPublished==='true');
+  if(nextPublished!==existing.is_published&&!await hasPermission(req.session.user,'announcements.publish'))return res.status(403).json({error:'You do not have permission to publish announcements.'});
+  if(b.priority&&!['Low','Normal','High','Urgent'].includes(b.priority))return res.status(400).json({error:'Invalid announcement priority.'});
   if(b.publishAt && !validDateOnly(b.publishAt)) return res.status(400).json({error:'Enter a valid publish date.'});
   if(b.expiresAt && !validDateOnly(b.expiresAt)) return res.status(400).json({error:'Enter a valid expiry date.'});
-  if(b.expiresAt && b.publishAt && b.expiresAt < b.publishAt) return res.status(400).json({error:'Expiry date cannot be before publish date.'});
-  const {rows}=await pool.query(`UPDATE announcements SET title=COALESCE($2,title),body=COALESCE($3,body),
-    priority=COALESCE($4,priority),publish_at=COALESCE($5,publish_at),expires_at=$6,is_published=COALESCE($7,is_published),updated_at=NOW()
-    WHERE id=$1 RETURNING *`,
-    [req.params.id,b.title||null,b.body||null,b.priority||null,b.publishAt||null,b.expiresAt??null,b.isPublished===undefined?null:(b.isPublished===true)]);
-  if(!rows[0])return res.status(404).json({error:'Announcement not found.'});
-  res.json({data:rows[0]});
+  const nextPublishAt = b.publishAt||null;
+  const nextExpiresAt = b.expiresAt===undefined?existing.expires_at:(b.expiresAt||null);
+  if(nextExpiresAt&&nextPublishAt&&nextExpiresAt<nextPublishAt) return res.status(400).json({error:'Expiry date cannot be before publish date.'});
+  const nextTargetAll = b.targetAll===undefined?existing.target_all:(b.targetAll===true||b.targetAll==='true');
+  const needsRecipients = !nextTargetAll && (existing.target_all || b.employeeIds!==undefined);
+  if(needsRecipients){
+    if(!Array.isArray(b.employeeIds)||!b.employeeIds.length)return res.status(400).json({error:'Select at least one employee for a targeted announcement.'});
+    if(b.employeeIds.some((id)=>!isUuid(id)))return res.status(400).json({error:'Select valid announcement recipients.'});
+  }
+  const updated=await inTransaction(async(client)=>{
+    const {rows}=await client.query(`UPDATE announcements SET title=COALESCE($2,title),body=COALESCE($3,body),
+      priority=COALESCE($4,priority),publish_at=COALESCE($5,publish_at),expires_at=$6,is_published=$7,target_all=$8,updated_at=NOW()
+      WHERE id=$1 RETURNING *`,
+      [req.params.id,b.title||null,b.body||null,b.priority||null,b.publishAt||null,nextExpiresAt,nextPublished,nextTargetAll]);
+    if(!rows[0])return null;
+    if(nextTargetAll || b.employeeIds!==undefined){
+      await client.query('DELETE FROM announcement_recipients WHERE announcement_id=$1',[req.params.id]);
+      if(!nextTargetAll)await client.query('INSERT INTO announcement_recipients (announcement_id,employee_id) SELECT $1,id FROM employees WHERE id=ANY($2::uuid[]) ON CONFLICT DO NOTHING',[req.params.id,b.employeeIds]);
+    }
+    return rows[0];
+  });
+  if(!updated)return res.status(404).json({error:'Announcement not found.'});
+  res.json({data:updated});
 }));
 
-router.delete('/announcements/:id', permission('announcements.create'), asyncRoute(async (req,res)=>{
+router.delete('/announcements/:id', permission('announcements.publish'), asyncRoute(async (req,res)=>{
   const {rowCount}=await pool.query('DELETE FROM announcements WHERE id=$1',[req.params.id]);
   if(!rowCount)return res.status(404).json({error:'Announcement not found.'});
   res.status(204).end();
@@ -1287,8 +1347,10 @@ router.delete('/roles/:id', permission('roles.manage'), asyncRoute(async (req,re
 }));
 
 router.get('/invitations', permission('invitations.send'), asyncRoute(async (_req,res)=>{
-  const {rows}=await pool.query(`SELECT i.id,i.subject,i.status,i.created_at,e.full_name AS employee,e.email,p.name AS project
-    FROM project_invitations i JOIN employees e ON e.id=i.employee_id JOIN projects p ON p.id=i.project_id
+  const {rows}=await pool.query(`SELECT i.id,i.subject,i.status,i.created_at,
+      COALESCE(e.full_name,i.recipient_name,i.recipient_email) AS employee,
+      COALESCE(e.email,i.recipient_email) AS email,COALESCE(p.name,'Custom email') AS project
+    FROM project_invitations i LEFT JOIN employees e ON e.id=i.employee_id LEFT JOIN projects p ON p.id=i.project_id
     ORDER BY i.created_at DESC LIMIT 200`);
   res.json({data:rows});
 }));
@@ -1330,7 +1392,7 @@ router.get('/lookups', requireAuth, asyncRoute(async (req,res)=>{
   }
   res.json({
     vendors,roles,permissions,employeeTypes:employeeTypes.map(({name})=>name),employees,invitationRecipients,projects,
-    emailConfigured:canInvite&&Boolean(config.email.user&&config.email.password&&config.email.from),
+    emailConfigured:canInvite&&config.email.configured,
   });
 }));
 
@@ -1397,15 +1459,22 @@ router.post('/upload/:kind', requireAuth, upload.single('file'), asyncRoute(asyn
   const column=kind==='project'?null:{'profile-photo':'profile_photo_url',resume:'resume_url','id-proof':'id_proof_url'}[kind];
   const previous=column?(await pool.query(`SELECT ${column} AS file_url FROM employees WHERE id=$1`,[employeeId])).rows[0]?.file_url:null;
   const stored=await uploadFile(req.file,folder);
-  if(kind!=='project'){
-    await inTransaction(async(client)=>{
-      await client.query(`UPDATE employees SET ${column}=$2,updated_at=NOW() WHERE id=$1`,[employeeId,stored.fileUrl]);
-      await client.query('DELETE FROM employee_documents WHERE employee_id=$1 AND document_type=$2',[employeeId,kind]);
-      await client.query('INSERT INTO employee_documents (employee_id,document_type,file_name,file_url,mime_type,size_bytes) VALUES ($1,$2,$3,$4,$5,$6)',[employeeId,kind,req.file.originalname,stored.fileUrl,req.file.mimetype,req.file.size]);
-    });
-  } else {
-    const projectId=required(req.body.projectId,'Project');
-    await pool.query('INSERT INTO project_attachments (project_id,file_name,file_url,mime_type,size_bytes) VALUES ($1,$2,$3,$4,$5)',[projectId,req.file.originalname,stored.fileUrl,req.file.mimetype,req.file.size]);
+  const fileName=safeFileName(req.file.originalname);
+  try {
+    if(kind!=='project'){
+      await inTransaction(async(client)=>{
+        await client.query(`UPDATE employees SET ${column}=$2,updated_at=NOW() WHERE id=$1`,[employeeId,stored.fileUrl]);
+        await client.query('DELETE FROM employee_documents WHERE employee_id=$1 AND document_type=$2',[employeeId,kind]);
+        await client.query('INSERT INTO employee_documents (employee_id,document_type,file_name,file_url,mime_type,size_bytes) VALUES ($1,$2,$3,$4,$5,$6)',[employeeId,kind,fileName,stored.fileUrl,req.file.mimetype,req.file.size]);
+      });
+    } else {
+      const projectId=required(req.body.projectId,'Project');
+      await pool.query('INSERT INTO project_attachments (project_id,file_name,file_url,mime_type,size_bytes) VALUES ($1,$2,$3,$4,$5)',[projectId,fileName,stored.fileUrl,req.file.mimetype,req.file.size]);
+    }
+  } catch(error) {
+    try { await deleteFile(stored.fileUrl); }
+    catch(cleanupError) { console.error('Upload rollback failed:',cleanupError.message); }
+    throw error;
   }
   let warning;
   if(previous&&previous!==stored.fileUrl){
@@ -1421,23 +1490,27 @@ router.delete('/employee-documents/:id', requireAuth, asyncRoute(async(req,res)=
   if(!document)return res.status(404).json({error:'Document not found.'});
   if(document.employee_id!==req.session.user.id&&!await hasPermission(req.session.user,'employees.edit'))return res.status(403).json({error:'You do not have permission to delete this document.'});
   const column={'profile-photo':'profile_photo_url',resume:'resume_url','id-proof':'id_proof_url'}[document.document_type];
-  const isPrivateFile=['resume','profile-photo'].includes(document.document_type)&&document.file_url.startsWith('/api/private-files/');
-  if(isPrivateFile){
-    const privateResume=await readPrivateFile(document.file_url.split('/').pop());
-    if(privateResume)await removePrivateFile(privateResume.filePath);
-  } else await deleteFile(document.file_url);
   await inTransaction(async(client)=>{
     if(column)await client.query(`UPDATE employees SET ${column}=NULL,updated_at=NOW() WHERE id=$1 AND ${column}=$2`,[document.employee_id,document.file_url]);
     await client.query('DELETE FROM employee_documents WHERE id=$1',[document.id]);
   });
+  try {
+    if(document.file_url.startsWith('/api/private-files/')) {
+      const privateFile=await readPrivateFile(document.file_url.split('/').pop());
+      if(privateFile)await removePrivateFile(privateFile.filePath);
+    } else await deleteFile(document.file_url);
+  } catch(error) {
+    console.error('Deleted document cleanup failed:',error.message);
+  }
   res.status(204).end();
 }));
 
 router.delete('/project-attachments/:id', permission('projects.edit'), asyncRoute(async(req,res)=>{
   const {rows}=await pool.query('SELECT id,file_url FROM project_attachments WHERE id=$1',[req.params.id]);
   if(!rows[0])return res.status(404).json({error:'Project attachment not found.'});
-  await deleteFile(rows[0].file_url);
   await inTransaction(async(client)=>{await client.query('DELETE FROM project_attachments WHERE id=$1',[req.params.id]);});
+  try { await deleteFile(rows[0].file_url); }
+  catch(error) { console.error('Deleted attachment cleanup failed:',error.message); }
   res.status(204).end();
 }));
 
@@ -1502,9 +1575,21 @@ router.delete('/email-templates/:id', permission('invitations.send'), asyncRoute
 
 router.post('/invitations', permission('invitations.send'), emailAttachments.array('attachments',5), asyncRoute(async (req,res)=>{
   const employeeIds=parseJsonField(req.body.employeeIds,[]);
-  if(!Array.isArray(employeeIds)||!employeeIds.length||employeeIds.length>100)return res.status(400).json({error:'Select between 1 and 100 employees.'});
+  const submittedCustomRecipients=parseJsonField(req.body.customRecipients,[]);
+  if(!Array.isArray(employeeIds)||!Array.isArray(submittedCustomRecipients)||employeeIds.length+submittedCustomRecipients.length<1||employeeIds.length+submittedCustomRecipients.length>100) {
+    return res.status(400).json({error:'Select between 1 and 100 employee or custom email recipients.'});
+  }
+  const normalizedCustomRecipients=[];
+  for(const entry of submittedCustomRecipients) {
+    const email=text(entry?.email,254).toLowerCase();
+    const name=text(entry?.name,120)||email;
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return res.status(400).json({error:'Enter a valid address for every custom recipient.'});
+    if(!normalizedCustomRecipients.some((recipient)=>recipient.email===email))normalizedCustomRecipients.push({email,name});
+  }
   const projectId=text(req.body.projectId,50);
-  if(!isUuid(projectId))return res.status(400).json({error:'Select a valid project.'});
+  if(projectId&&!isUuid(projectId))return res.status(400).json({error:'Select a valid project.'});
+  if(employeeIds.length&&!projectId)return res.status(400).json({error:'Choose a project when sending to workspace employees.'});
+  if(!projectId&&!normalizedCustomRecipients.length)return res.status(400).json({error:'Choose a project or add a custom email recipient.'});
   const templateId=req.body.templateId&&isUuid(req.body.templateId)?text(req.body.templateId,50):null;
   const emailSubject=required(req.body.subject,'Email subject');
   const bodyHtml=typeof req.body.bodyHtml==='string'?req.body.bodyHtml.slice(0,100000):'';
@@ -1512,14 +1597,15 @@ router.post('/invitations', permission('invitations.send'), emailAttachments.arr
   if(!emailMessage&&!bodyHtml)return res.status(400).json({error:'Write an email message before sending.'});
   const files=Array.isArray(req.files)?req.files:[];
   if(files.reduce((total,file)=>total+file.size,0)>10*1024*1024)return res.status(413).json({error:'Attachments must total 10 MB or less.'});
+  if(files.some((file)=>!contentMatchesMime(file.buffer,file.mimetype)))return res.status(400).json({error:'An attachment does not match its file type.'});
   if(!config.email.configured) {
     return res.status(503).json({
       error:`Email sending is not configured. Add ${config.email.missing.join(', ')} to the backend environment, then restart the backend.`,
       missing:config.email.missing,
     });
   }
-  const {rows:projectRows}=await pool.query('SELECT name FROM projects WHERE id=$1',[projectId]);
-  if(!projectRows[0])return res.status(404).json({error:'Project not found.'});
+  const projectRows=projectId?(await pool.query('SELECT name FROM projects WHERE id=$1',[projectId])).rows:[];
+  if(projectId&&!projectRows[0])return res.status(404).json({error:'Project not found.'});
   const selectedIds=[...new Set(employeeIds)];
   const {rows:recipients}=await pool.query(
     "SELECT id,email,full_name FROM employees WHERE id=ANY($1::uuid[]) AND status='active' ORDER BY full_name",
@@ -1529,38 +1615,54 @@ router.post('/invitations', permission('invitations.send'), emailAttachments.arr
   if(recipients.some((employee)=>!employee.email?.trim())) {
     return res.status(400).json({error:'Add an email address to every selected employee before sending invitations.'});
   }
+  if(recipients.length&&!projectId)return res.status(400).json({error:'Choose a project when sending to workspace employees.'});
+  const recipientEmails=new Set(recipients.map((employee)=>employee.email.trim().toLowerCase()));
+  const allRecipients=[
+    ...recipients.map((employee)=>({...employee,recipientEmail:employee.email.trim(),recipientName:employee.full_name,isEmployee:true})),
+    ...normalizedCustomRecipients
+      .filter((recipient)=>!recipientEmails.has(recipient.email))
+      .map((recipient)=>({...recipient,recipientEmail:recipient.email,recipientName:recipient.name,isEmployee:false})),
+  ];
+  if(allRecipients.length>100)return res.status(400).json({error:'A campaign cannot have more than 100 unique email recipients.'});
+  if(!allRecipients.length)return res.status(400).json({error:'Select at least one recipient.'});
   const transporter=createTransporter();
-  const html=invitationHtml(bodyHtml,emailMessage,projectRows[0].name);
-  const attachments=files.map((file)=>({filename:file.originalname,content:file.buffer,contentType:file.mimetype}));
-  const outcomes=new Array(recipients.length);
+  const projectName=projectRows[0]?.name||'';
+  const html=projectName?invitationHtml(bodyHtml,emailMessage,projectName):sanitizeHtml(bodyHtml)||plainToHtml(emailMessage);
+  const attachments=files.map((file)=>({filename:safeFileName(file.originalname),content:file.buffer,contentType:file.mimetype}));
+  const outcomes=new Array(allRecipients.length);
   let nextIndex=0;
   async function sendNext(){
-    while(nextIndex<recipients.length){
+    while(nextIndex<allRecipients.length){
       const index=nextIndex++;
-      const employee=recipients[index];
+      const recipient=allRecipients[index];
       let status='Sent';
       try {
         await transporter.sendMail({
           from:config.email.from,
-          to:employee.email,
+          to:recipient.recipientEmail,
           subject:emailSubject,
-          text:`${emailMessage}\n\nProject: ${projectRows[0].name}`,
+          text:projectName?`${emailMessage}\n\nProject: ${projectName}`:emailMessage,
           html,
           attachments,
         });
       } catch (error) {
         status='Failed';
-        console.error(`Invitation email failed for employee ${employee.id}:`,error.message);
+        console.error(`Invitation email failed for ${recipient.isEmployee ? `employee ${recipient.id}` : recipient.recipientEmail}:`,error.message);
       }
-      await pool.query(`INSERT INTO project_invitations (project_id,employee_id,subject,message,status,body_html,attachment_names,template_id)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        ON CONFLICT (project_id,employee_id) DO UPDATE SET subject=EXCLUDED.subject,message=EXCLUDED.message,status=EXCLUDED.status,body_html=EXCLUDED.body_html,attachment_names=EXCLUDED.attachment_names,template_id=EXCLUDED.template_id,created_at=NOW()`,
-        [projectId,employee.id,emailSubject,emailMessage,status,bodyHtml||null,attachments.map((file)=>file.filename),templateId]);
-      outcomes[index]={employeeId:employee.id,status};
+      if(recipient.isEmployee) {
+        await pool.query(`INSERT INTO project_invitations (project_id,employee_id,recipient_email,recipient_name,subject,message,status,body_html,attachment_names,template_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [projectId,recipient.id,recipient.recipientEmail,recipient.recipientName,emailSubject,emailMessage,status,bodyHtml||null,attachments.map((file)=>file.filename),templateId]);
+      } else {
+        await pool.query(`INSERT INTO project_invitations (project_id,recipient_email,recipient_name,subject,message,status,body_html,attachment_names,template_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [projectId,recipient.recipientEmail,recipient.recipientName,emailSubject,emailMessage,status,bodyHtml||null,attachments.map((file)=>file.filename),templateId]);
+      }
+      outcomes[index]={employeeId:recipient.isEmployee?recipient.id:null,email:recipient.recipientEmail,status};
     }
   }
   try {
-    await Promise.all(Array.from({length:Math.min(5,recipients.length)},()=>sendNext()));
+    await Promise.all(Array.from({length:Math.min(5,allRecipients.length)},()=>sendNext()));
   } finally {
     await transporter.close();
   }

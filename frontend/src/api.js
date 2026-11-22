@@ -80,6 +80,7 @@ export async function api(path, options = {}) {
   if (response.status === 401 && typeof window !== 'undefined'
       && !path.startsWith('/public/forms/')
       && !path.startsWith('/auth/login')
+      && !path.startsWith('/auth/session')
       && !path.startsWith('/auth/send-otp')
       && !path.startsWith('/auth/verify-otp')
       && !path.startsWith('/auth/register/')) {

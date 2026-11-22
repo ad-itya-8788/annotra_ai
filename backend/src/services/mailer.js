@@ -23,16 +23,17 @@ export function createTransporter() {
   });
 }
 
+const cleanTag = (tag) => tag
+  .replace(/\b(?:on[a-z]+|srcdoc|formaction|background|lowsrc)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+  .replace(/\b(?:href|src|xlink:href|action)\s*=\s*(?:"[^"]*(?:javascript:|vbscript|data:)[^"]*"|'[^']*(?:javascript:|vbscript|data:)[^']*'|[^\s>]*(?:javascript:|vbscript|data:)[^\s>]*)/gi, '')
+  .replace(/\bstyle\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, (attribute) => /expression|url\s*\(/i.test(attribute) ? '' : attribute);
+
 export function sanitizeHtml(value) {
   return String(value || '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<iframe[\s\S]*?<\/iframe>/gi, '')
-    .replace(/\son[a-z]+\s*=\s*(['"]).*?\1/gis, '')
-    .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '')
-    .replace(/<(object|embed|form|svg|math|link|meta|base|frame|frameset)\b[^>]*\/?>/gi, '')
-    .replace(/<\/(object|embed|form|svg|math|frame|frameset)>/gi, '')
-    .replace(/\s(?:style|href|src)\s*=\s*(['"])[^'"]*(?:javascript:|vbscript:|data:)[^'"]*\1/gi, '')
+    .replace(/<(script|style|iframe|object|embed|form|svg|math|link|meta|base|frame|frameset|template)\b[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<(script|style|iframe|object|embed|form|svg|math|link|meta|base|frame|frameset|template|input|button|select|textarea)\b(?:[^>"']|"[^"]*"|'[^']*')*\/?>/gi, '')
+    .replace(/<\/(object|embed|form|svg|math|frame|frameset|template)>/gi, '')
+    .replace(/<(?:[^>"']|"[^"]*"|'[^']*')+>/g, cleanTag)
     .replace(/\b(?:javascript|vbscript|data):/gi, '')
     .trim();
 }

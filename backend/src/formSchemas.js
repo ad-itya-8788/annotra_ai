@@ -68,15 +68,14 @@ export function normalizeFormAnswers(fields, submitted) {
   for (const field of fields) {
     const value = submitted[field.id];
     if (field.type === 'multiple') {
-      if (value === undefined || value === null || value === '') {
-        if (field.required) throw Object.assign(new Error(`"${field.label}" is required.`), { status: 400 });
-        answers[field.id] = '';
-        continue;
+      const selected = Array.isArray(value)
+        ? value.map((item) => String(item).trim()).filter(Boolean)
+        : typeof value === 'string' && value.trim() ? [value.trim()] : [];
+      if (!selected.length && field.required) throw Object.assign(new Error(`"${field.label}" is required.`), { status: 400 });
+      if (selected.some((item) => !field.options.includes(item))) {
+        throw Object.assign(new Error(`Choose valid options for "${field.label}".`), { status: 400 });
       }
-      if (typeof value !== 'string' || !field.options.includes(value.trim())) {
-        throw Object.assign(new Error(`Choose one valid option for "${field.label}".`), { status: 400 });
-      }
-      answers[field.id] = value.trim();
+      answers[field.id] = selected;
       continue;
     }
     if (field.type === 'file') {

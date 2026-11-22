@@ -145,8 +145,10 @@ CREATE TABLE IF NOT EXISTS announcement_recipients (
 
 CREATE TABLE IF NOT EXISTS project_invitations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  employee_id UUID NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+  employee_id UUID REFERENCES employees(id) ON DELETE CASCADE,
+  recipient_email TEXT,
+  recipient_name TEXT,
   subject TEXT NOT NULL,
   message TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('Sent', 'Delivered', 'Failed', 'Accepted', 'Declined')),
@@ -155,7 +157,8 @@ CREATE TABLE IF NOT EXISTS project_invitations (
   attachment_names TEXT[],
   template_id UUID,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (project_id, employee_id)
+  CONSTRAINT project_invitations_recipient_present
+    CHECK (employee_id IS NOT NULL OR recipient_email IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS email_templates (

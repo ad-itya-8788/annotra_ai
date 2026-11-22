@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Check, Copy, Download, ExternalLink, FilePlus2, LoaderCircle, Plus, Send, Trash2, X } from 'lucide-react';
-import { api, setCsrfToken } from './api.js';
-import { updatePageMetadata } from './seo.js';
+import { api, setCsrfToken } from '../../api.js';
+import { updatePageMetadata } from '../../seo.js';
+import './index.css';
 
 const fieldTypes = [
   ['short', 'Short answer'],
@@ -11,7 +12,7 @@ const fieldTypes = [
   ['number', 'Number'],
   ['date', 'Date'],
   ['single', 'Multiple choice'],
-  ['multiple', 'Checkboxes (select one)'],
+  ['multiple', 'Checkboxes (select many)'],
   ['dropdown', 'Dropdown'],
   ['file', 'File upload'],
 ];
@@ -273,7 +274,10 @@ function FormQuestion({ field, value, onChange, onFileChange, uploading }) {
   </>;
   if (field.type === 'paragraph') return <textarea rows="4" aria-labelledby={labelId} value={value || ''} placeholder={placeholder} required={field.required} onChange={(event) => onChange(event.target.value)}/>;
   if (field.type === 'single') return <div className="public-form-choices" role="radiogroup" aria-labelledby={labelId}>{field.options.map((option) => <label key={option}><input type="radio" name={field.id} value={option} checked={value === option} required={field.required} onChange={() => onChange(option)}/>{option}</label>)}</div>;
-  if (field.type === 'multiple') return <div className="public-form-choices" role="group" aria-labelledby={labelId}>{field.options.map((option) => <label key={option}><input type="checkbox" value={option} checked={value === option} onChange={(event) => onChange(event.target.checked ? option : '')}/>{option}</label>)}</div>;
+  if (field.type === 'multiple') {
+    const selected = Array.isArray(value) ? value : [];
+    return <div className="public-form-choices" role="group" aria-labelledby={labelId}>{field.options.map((option) => <label key={option}><input type="checkbox" value={option} checked={selected.includes(option)} onChange={(event) => onChange(event.target.checked ? [...selected, option] : selected.filter((item) => item !== option))}/>{option}</label>)}</div>;
+  }
   if (field.type === 'dropdown') return <select aria-labelledby={labelId} value={value || ''} required={field.required} onChange={(event) => onChange(event.target.value)}><option value="">Select an option</option>{field.options.map((option) => <option key={option} value={option}>{option}</option>)}</select>;
   const type = field.type === 'short' ? 'text' : field.type === 'phone' ? 'tel' : field.type;
   return <input type={type} aria-labelledby={labelId} value={value || ''} placeholder={placeholder} required={field.required} onChange={(event) => onChange(event.target.value)}/>;
@@ -369,3 +373,4 @@ export function PublicFormPage({ slug }) {
     </form>
   </main>;
 }
+
